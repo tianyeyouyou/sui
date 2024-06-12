@@ -192,8 +192,23 @@ macro_rules! query {
         $crate::raw_query::RawQuery::new($select, vec![])
     };
 
+    // Handle a select clause with ongoing subquery and a new subquery with alias
+    ($select:expr, $ongoing_subquery:expr, aliased => ($new_subquery:expr, $alias:expr)) => {{
+        use $crate::raw_query::RawQuery;
+        let (ongoing_sql, mut ongoing_binds) = $ongoing_subquery.finish();
+        let (new_sql, new_binds) = $new_subquery.finish();
+
+        ongoing_binds.extend(new_binds);
+
+        let new_subquery_sql = format!("({}) AS {}", new_sql, $alias);
+        let select_formatted = format!($select, ongoing_sql, new_subquery_sql);
+
+        RawQuery::new(select_formatted, ongoing_binds)
+    }};
+
     // Expects a select clause and one or more subqueries. The select clause should contain curly
-    // braces for subqueries to be interpolated into.
+    // braces for subqueries to be interpolated into. Use when the subqueries can be aliased
+    // directly in the select statement.
     ($select:expr $(,$subquery:expr)+) => {{
         use $crate::raw_query::RawQuery;
         let mut binds = vec![];

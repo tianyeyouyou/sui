@@ -95,3 +95,15 @@ pub use crate::schema::pg::events_partition_0;
 pub use crate::schema::pg::objects_history_partition_0;
 #[cfg(feature = "postgres-feature")]
 pub use crate::schema::pg::transactions_partition_0;
+// TODO(wlmyng): follow the format set above
+pub use crate::schema::pg::amnn_0_hybrid_cp_tx;
+pub use crate::schema::pg::amnn_0_hybrid_transactions;
+pub use crate::schema::pg::amnn_0_hybrid_tx_calls_fun;
+pub use crate::schema::pg::amnn_0_hybrid_tx_calls_mod;
+pub use crate::schema::pg::amnn_0_hybrid_tx_calls_pkg;
+pub use crate::schema::pg::amnn_0_hybrid_tx_changed_objects;
+pub use crate::schema::pg::amnn_0_hybrid_tx_digests;
+pub use crate::schema::pg::amnn_0_hybrid_tx_input_objects;
+pub use crate::schema::pg::amnn_0_hybrid_tx_kinds;
+pub use crate::schema::pg::amnn_0_hybrid_tx_recipients;
+pub use crate::schema::pg::amnn_0_hybrid_tx_senders;

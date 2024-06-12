@@ -243,9 +243,18 @@ impl MovePackage {
         last: Option<u64>,
         before: Option<transaction_block::Cursor>,
         filter: Option<TransactionBlockFilter>,
+        within_checkpoints: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>> {
         ObjectImpl(&self.super_)
-            .received_transaction_blocks(ctx, first, after, last, before, filter)
+            .received_transaction_blocks(
+                ctx,
+                first,
+                after,
+                last,
+                before,
+                filter,
+                within_checkpoints,
+            )
             .await
     }
 

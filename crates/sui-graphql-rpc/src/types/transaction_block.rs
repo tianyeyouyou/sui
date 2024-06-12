@@ -1,22 +1,22 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-
 use async_graphql::{
     connection::{Connection, CursorType, Edge},
     dataloader::Loader,
     *,
 };
-use diesel::{ExpressionMethods, JoinOnDsl, QueryDsl, SelectableHelper};
+use diesel::{
+    deserialize::{Queryable, QueryableByName},
+    ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl, Selectable, SelectableHelper,
+};
 use fastcrypto::encoding::{Base58, Encoding};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write;
 use sui_indexer::{
     models::transactions::StoredTransaction,
-    schema::{
-        transactions, tx_calls_fun, tx_changed_objects, tx_digests, tx_input_objects,
-        tx_recipients, tx_senders,
-    },
+    schema::{amnn_0_hybrid_cp_tx, amnn_0_hybrid_transactions, transactions, tx_digests},
 };
 use sui_types::{
     base_types::SuiAddress as NativeSuiAddress,
@@ -33,16 +33,16 @@ use crate::{
     consistency::Checkpointed,
     data::{self, DataLoader, Db, DbConnection, QueryExecutor},
     error::Error,
-    filter, or_filter, query,
+    filter, query,
     raw_query::RawQuery,
     server::watermark_task::Watermark,
-    types::intersect,
+    types::{intersect, type_filter::ModuleFilter},
 };
 
 use super::{
     address::Address,
     base64::Base64,
-    cursor::{self, Page, Paginated, Target},
+    cursor::{self, Page, Paginated, RawPaginated, Target},
     digest::Digest,
     epoch::Epoch,
     gas::GasInput,
@@ -138,6 +138,17 @@ pub(crate) struct TransactionBlockCursor {
 struct DigestKey {
     pub digest: Digest,
     pub checkpoint_viewed_at: u64,
+}
+
+#[derive(Clone, Debug, Queryable, QueryableByName, Selectable)]
+#[diesel(table_name = transactions)]
+pub struct TxLookup {
+    pub tx_sequence_number: i64,
+}
+
+pub enum TxLookupBound {
+    Range((Option<u64>, Option<u64>)),
+    Set(Vec<u64>),
 }
 
 #[Object]
@@ -299,257 +310,216 @@ impl TransactionBlock {
     ///
     /// If the `Page<Cursor>` is set, then this function will defer to the `checkpoint_viewed_at` in
     /// the cursor if they are consistent.
+    ///
+    /// Filters that involve a combination of `recvAddress`, `inputObject`, `changedObject`, and
+    /// `function` should provide a value for `within_checkpoints`.
     pub(crate) async fn paginate(
-        db: &Db,
+        ctx: &Context<'_>,
         page: Page<Cursor>,
         filter: TransactionBlockFilter,
         checkpoint_viewed_at: u64,
+        within_checkpoints: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>, Error> {
-        use transactions as tx;
+        filter.is_consistent()?;
 
-        let cursor_viewed_at = page.validate_cursor_consistency()?;
-        let checkpoint_viewed_at = cursor_viewed_at.unwrap_or(checkpoint_viewed_at);
+        let db: &Db = ctx.data_unchecked();
 
-        let (prev, next, results) = db
-            .execute(move |conn| {
-                page.paginate_query::<StoredTransaction, _, _, _>(
-                    conn,
-                    checkpoint_viewed_at,
-                    move || {
-                        let mut query = tx::dsl::transactions.into_boxed();
+        // Anchor the lower and upper checkpoint bounds on what is provided in the filter. Increment
+        // `after` by 1 so that we can uniformly select the `min_tx_sequence_number` for the lower
+        // bound. Similarly, decrement `before` by 1 so that we can uniformly select the
+        // `max_tx_sequence_number`. In other words, the range consists of all transactions from the
+        // smallest tx_sequence_number in lo_cp to the max tx_sequence_number in hi_cp.
+        let mut lo_cp = max_option(
+            filter.after_checkpoint.map(|x| x.saturating_add(1)),
+            filter.at_checkpoint,
+        );
+        let mut hi_cp = min_option(
+            filter.at_checkpoint,
+            filter.before_checkpoint.map(|x| x.saturating_sub(1)),
+        );
 
-                        if let Some(f) = &filter.function {
-                            let sub_query = tx_calls_fun::dsl::tx_calls_fun
-                                .select(tx_calls_fun::dsl::tx_sequence_number)
-                                .into_boxed();
-
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(f.apply(
-                                sub_query,
-                                tx_calls_fun::dsl::package,
-                                tx_calls_fun::dsl::module,
-                                tx_calls_fun::dsl::func,
-                            )));
-                        }
-
-                        if let Some(k) = &filter.kind {
-                            query = query.filter(tx::dsl::transaction_kind.eq(*k as i16))
-                        }
-
-                        if let Some(c) = &filter.after_checkpoint {
-                            query = query.filter(tx::dsl::checkpoint_sequence_number.gt(*c as i64));
-                        }
-
-                        if let Some(c) = &filter.at_checkpoint {
-                            query = query.filter(tx::dsl::checkpoint_sequence_number.eq(*c as i64));
-                        }
-
-                        let before_checkpoint = filter
-                            .before_checkpoint
-                            .map_or(checkpoint_viewed_at + 1, |c| {
-                                c.min(checkpoint_viewed_at + 1)
-                            });
-                        query = query.filter(
-                            tx::dsl::checkpoint_sequence_number.lt(before_checkpoint as i64),
-                        );
-
-                        if let Some(a) = &filter.sign_address {
-                            let sub_query = tx_senders::dsl::tx_senders
-                                .select(tx_senders::dsl::tx_sequence_number)
-                                .filter(tx_senders::dsl::sender.eq(a.into_vec()));
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
-                        }
-
-                        if let Some(a) = &filter.recv_address {
-                            let sub_query = tx_recipients::dsl::tx_recipients
-                                .select(tx_recipients::dsl::tx_sequence_number)
-                                .filter(tx_recipients::dsl::recipient.eq(a.into_vec()));
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
-                        }
-
-                        if let Some(o) = &filter.input_object {
-                            let sub_query = tx_input_objects::dsl::tx_input_objects
-                                .select(tx_input_objects::dsl::tx_sequence_number)
-                                .filter(tx_input_objects::dsl::object_id.eq(o.into_vec()));
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
-                        }
-
-                        if let Some(o) = &filter.changed_object {
-                            let sub_query = tx_changed_objects::dsl::tx_changed_objects
-                                .select(tx_changed_objects::dsl::tx_sequence_number)
-                                .filter(tx_changed_objects::dsl::object_id.eq(o.into_vec()));
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
-                        }
-
-                        if let Some(txs) = &filter.transaction_ids {
-                            let digests: Vec<_> = txs.iter().map(|d| d.to_vec()).collect();
-                            query = query.filter(tx::dsl::transaction_digest.eq_any(digests));
-                        }
-
-                        query
-                    },
-                )
-            })
-            .await?;
-
-        let mut conn = Connection::new(prev, next);
-
-        // The "checkpoint viewed at" sets a consistent upper bound for the nested queries.
-        for stored in results {
-            let cursor = stored.cursor(checkpoint_viewed_at).encode_cursor();
-            let inner = TransactionBlockInner::try_from(stored)?;
-            let transaction = TransactionBlock {
-                inner,
-                checkpoint_viewed_at,
-            };
-            conn.edges.push(Edge::new(cursor, transaction));
+        // If `within_checkpoints` is set, we need to adjust the lower and upper bounds. It is up to
+        // the caller of `TransactionBlock::paginate` to determine whether `within_checkpoints` is
+        // required.
+        if let Some(scan_limit) = within_checkpoints {
+            if page.is_from_front() {
+                hi_cp = min_option(hi_cp, Some(lo_cp.unwrap_or(0).saturating_add(scan_limit)));
+            } else {
+                // Similar to the `first` case, `checkpoint_viewed_at` offers a fixed point to
+                // determine how many more checkpoints to scan.
+                lo_cp = max_option(
+                    lo_cp,
+                    Some(
+                        hi_cp
+                            .unwrap_or(checkpoint_viewed_at)
+                            .saturating_sub(scan_limit),
+                    ),
+                );
+            }
         }
 
-        Ok(conn)
-    }
+        use amnn_0_hybrid_cp_tx::dsl as cp;
+        use amnn_0_hybrid_transactions::dsl as tx;
 
-    pub(crate) async fn paginate_v2(
-        db: &Db,
-        page: Page<Cursor>,
-        filter: TransactionBlockFilter,
-        checkpoint_viewed_at: u64,
-        scan_limit: Option<u64>,
-    ) -> Result<Connection<String, TransactionBlock>, Error> {
-        use transactions as tx;
+        let (prev, next, transactions): (bool, bool, Vec<StoredTransaction>) = db
+            .execute_repeatable(move |conn| {
 
-        let cursor_viewed_at = page.validate_cursor_consistency()?;
-        let checkpoint_viewed_at = cursor_viewed_at.unwrap_or(checkpoint_viewed_at);
+                // Map the lower and upper checkpoint bounds to their respective tx_sequence_number.
+                let lb_tx_seq_num = match lo_cp {
+                    Some(lb_value) => {
+                        let sequence_number: Option<i64> = conn
+                            .first(move || {
+                                cp::amnn_0_hybrid_cp_tx
+                                    .select(cp::min_tx_sequence_number)
+                                    .filter(cp::checkpoint_sequence_number.eq(lb_value as i64))
+                            })
+                            .optional()?;
 
-        let (prev, next, results) = db
-            .execute(move |conn| {
-                page.paginate_query::<StoredTransaction, _, _, _>(
-                    conn,
-                    checkpoint_viewed_at,
-                    move || {
-                        let mut query = tx::dsl::transactions.into_boxed();
+                        sequence_number.map(|sequence_number| sequence_number as u64)
+                    }
+                    None => None,
+                };
+                let ub_tx_seq_num = match hi_cp {
+                    Some(ub_value) => {
+                        let sequence_number: Option<i64> = conn
+                            .first(move || {
+                                cp::amnn_0_hybrid_cp_tx
+                                    .select(cp::max_tx_sequence_number)
+                                    .filter(cp::checkpoint_sequence_number.eq(ub_value as i64))
+                            })
+                            .optional()?;
 
-                        if let Some(f) = &filter.function {
-                            let sub_query = tx_calls::dsl::tx_calls
-                                .select(tx_calls::dsl::tx_sequence_number)
-                                .into_boxed();
+                        sequence_number.map(|sequence_number| sequence_number as u64)
+                    }
+                    None => None,
+                };
 
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(f.apply(
-                                sub_query,
-                                tx_calls::dsl::package,
-                                tx_calls::dsl::module,
-                                tx_calls::dsl::func,
-                            )));
-                        }
+                let before_cursor = page.before().map(|c| c.tx_sequence_number);
+                let after_cursor = page.after().map(|c| c.tx_sequence_number);
 
-                        if let Some(k) = &filter.kind {
-                            query = query.filter(tx::dsl::transaction_kind.eq(*k as i16))
-                        }
+                let lo = max_option(lb_tx_seq_num, after_cursor);
+                let hi = min_option(ub_tx_seq_num, before_cursor);
 
-                        if let Some(c) = &filter.after_checkpoint {
-                            query = query.filter(tx::dsl::checkpoint_sequence_number.gt(*c as i64));
-                        }
+                let sender = filter.sign_address;
 
-                        if let Some(c) = &filter.at_checkpoint {
-                            query = query.filter(tx::dsl::checkpoint_sequence_number.eq(*c as i64));
-                        }
+                // if tx_digests is specified, we can use that to further filter each subquery
+                // wonder if we can drop the `within_checkpoints` requirement if `transaction_ids`
+                // is specified?
 
-                        let before_checkpoint = filter
-                            .before_checkpoint
-                            .map_or(checkpoint_viewed_at + 1, |c| {
-                                c.min(checkpoint_viewed_at + 1)
-                            });
-                        query = query.filter(
-                            tx::dsl::checkpoint_sequence_number.lt(before_checkpoint as i64),
-                        );
+                let mut bound = TxLookupBound::from_range((lo, hi));
 
-                        if let Some(a) = &filter.sign_address {
-                            let sub_query = tx_senders::dsl::tx_senders
-                                .select(tx_senders::dsl::tx_sequence_number)
-                                .filter(tx_senders::dsl::sender.eq(a.into_vec()));
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
-                        }
+                if let Some(txs) = &filter.transaction_ids {
+                    let transaction_ids: Vec<TxLookup> = conn.results(move || select_ids(txs, &bound).into_boxed())?;
+                    bound = TxLookupBound::from_set(transaction_ids.into_iter().map(|tx| tx.tx_sequence_number as u64).collect());
+                }
 
-                        if let Some(a) = &filter.recv_address {
-                            let sub_query = tx_recipients::dsl::tx_recipients
-                                .select(tx_recipients::dsl::tx_sequence_number)
-                                .filter(tx_recipients::dsl::recipient.eq(a.into_vec()));
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
-                        }
+                let mut subqueries = vec![];
 
-                        if let Some(o) = &filter.input_object {
-                            let sub_query = tx_input_objects::dsl::tx_input_objects
-                                .select(tx_input_objects::dsl::tx_sequence_number)
-                                .filter(tx_input_objects::dsl::object_id.eq(o.into_vec()));
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
-                        }
+                if let Some(f) = &filter.function {
+                    subqueries.push(match f {
+                        FqNameFilter::ByModule(filter) => match filter {
+                            ModuleFilter::ByPackage(p) => {
+                                (select_pkg(p, sender, &bound), "tx_calls_pkg")
+                            }
+                            ModuleFilter::ByModule(p, m) => {
+                                (select_mod(p, m.clone(), sender, &bound), "tx_calls_mod")
+                            }
+                        },
+                        FqNameFilter::ByFqName(p, m, n) => (
+                            select_fun(p, m.clone(), n.clone(), sender, &bound),
+                            "tx_calls_fun",
+                        ),
+                    });
+                }
+                if let Some(kind) = &filter.kind {
+                    subqueries.push((select_kind(kind.clone(), &bound), "tx_kinds"));
+                    if let Some(sender) = &sender {
+                        subqueries.push((select_sender(sender, &bound), "tx_senders"));
+                    }
+                }
+                if let Some(recv) = &filter.recv_address {
+                    subqueries.push((select_recipient(recv, sender, &bound), "tx_recipients"));
+                }
+                if let Some(input) = &filter.input_object {
+                    subqueries.push((select_input(input, sender, &bound), "tx_input_objects"));
+                }
+                if let Some(changed) = &filter.changed_object {
+                    subqueries.push((
+                        select_changed(changed, sender, &bound),
+                        "tx_changed_objects",
+                    ));
+                }
 
-                        if let Some(o) = &filter.changed_object {
-                            let sub_query = tx_changed_objects::dsl::tx_changed_objects
-                                .select(tx_changed_objects::dsl::tx_sequence_number)
-                                .filter(tx_changed_objects::dsl::object_id.eq(o.into_vec()));
-                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
-                        }
+                if filter.num_filters() == 0 {
+                    // We don't need to explicitly specify sender unless it's the only filter
+                    if let Some(sender) = &sender {
+                        subqueries.push((select_sender(sender, &bound), "tx_senders"));
+                    }
+                    // And if there are no filters at all, we can operate directly on the main table
+                    else {
+                        subqueries.push((
+                            select_tx(None, &bound, "amnn_0_hybrid_transactions"),
+                            "transactions",
+                        ));
+                    }
+                }
 
-                        if let Some(txs) = &filter.transaction_ids {
-                            let digests: Vec<_> = txs.iter().map(|d| d.to_vec()).collect();
-                            query = query.filter(tx::dsl::transaction_digest.eq_any(digests));
-                        }
+                // Finally, join the array of subqueries into a single query that looks like: SELECT
+                // tx_sequence_number FROM (SELECT tx_sequence_number FROM table0 WHERE ...) AS
+                // table0 INNER JOIN (SELECT ...) AS table1 USING (tx_sequence_number) ORDER BY
+                // tx_sequence_number ASC LIMIT 52;
 
-                        query
-                    },
-                )
-            })
-            .await?;
+                // There should be at least one subquery even if no filters are specified - the
+                // query against the base table. Otherwise the array will contain subqueries that
+                // hit lookup tables.
+                let mut subquery = subqueries.pop().unwrap().0;
 
-        let mut conn = Connection::new(prev, next);
+                if !subqueries.is_empty() {
+                    subquery = query!(
+                        "SELECT tx_sequence_number FROM ({}) AS initial",
+                        subquery
+                    );
+                    while let Some((subselect, alias)) = subqueries.pop() {
+                        subquery =
+                            query!("{} INNER JOIN {} USING (tx_sequence_number)", subquery, aliased => (subselect, alias));
+                    }
+                }
 
-        // The "checkpoint viewed at" sets a consistent upper bound for the nested queries.
-        for stored in results {
-            let cursor = stored.cursor(checkpoint_viewed_at).encode_cursor();
-            let inner = TransactionBlockInner::try_from(stored)?;
-            let transaction = TransactionBlock {
-                inner,
-                checkpoint_viewed_at,
-            };
-            conn.edges.push(Edge::new(cursor, transaction));
-        }
+                // Issue the query to fetch the set of `tx_sequence_number` that will then be used
+                // to fetch remaining contents from the `transactions` table.
 
-        Ok(conn)
-    }
+                // TODO (wlmyng): this typing is a bit hacky, and we likely don't need it
+                println!("Submitting the query now");
+                let (prev, next, results) =
+                    page.paginate_raw_query::<TxLookup>(conn, checkpoint_viewed_at, subquery)?;
 
-    pub(crate) async fn my_head(
-        db: &Db,
-        page: Page<Cursor>,
-        filter: TransactionBlockFilter,
-        checkpoint_viewed_at: u64,
-        scan_limit: Option<u64>,
-    ) {
-        // handle inconsistencies - immediately return empty result
-
-        if !filter.is_consistent() {
-            return None;
-        }
-
-        use transactions::dsl as tx;
-        // determine upper and lower bounds, apply scan limit
-
-        // do the queries for tx_sequence_number
-        if filter.is_single_filter() {
-            let transactions: Vec<StoredTransaction> = db.execute_repeatable(move |conn| {
-                // fetch tx_sequence_number
-                let tx_sequence_numbers = vec![1, 2, 3, 4, 5];
+                let tx_sequence_numbers = results
+                    .into_iter()
+                    .map(|x| x.tx_sequence_number)
+                    .collect::<Vec<i64>>();
 
                 // then just do a multi-get
                 let transactions = conn.results(move || {
-                    tx::transactions.filter(tx::tx_sequence_number.eq_any(tx_sequence_numbers))
-                });
+                    tx::amnn_0_hybrid_transactions
+                        .filter(tx::tx_sequence_number.eq_any(tx_sequence_numbers.clone()))
+                })?;
+                Ok::<_, diesel::result::Error>((prev, next, transactions))
+            })
+            .await?;
 
-                transactions
-            });
+        let mut conn = Connection::new(prev, next);
+
+        for stored in transactions {
+            let cursor = stored.cursor(checkpoint_viewed_at).encode_cursor();
+            let inner = TransactionBlockInner::try_from(stored)?;
+            let transaction = TransactionBlock {
+                inner,
+                checkpoint_viewed_at,
+            };
+            conn.edges.push(Edge::new(cursor, transaction));
         }
 
-        None
-
-        // finally, the multi-get
+        Ok(conn)
     }
 }
 
@@ -586,48 +556,76 @@ impl TransactionBlockFilter {
         })
     }
 
-    pub(crate) fn is_single_filter(self) -> bool {
-        let filters_count = [
+    /// Returns count of filters that would require a `scan_limit` if used together.
+    pub(crate) fn num_filters(&self) -> usize {
+        [
             self.recv_address.is_some(),
             self.input_object.is_some(),
             self.changed_object.is_some(),
             self.function.is_some(),
+            self.kind.is_some(),
         ]
         .iter()
         .filter(|&is_set| *is_set)
-        .count();
-
-        filters_count <= 1
+        .count()
     }
 
-    pub(crate) fn is_consistent(self) -> bool {
-        let mut consistent = true;
-
+    pub(crate) fn is_consistent(&self) -> Result<(), Error> {
         if let Some(before) = self.before_checkpoint {
-            consistent &= Some(before) > 0;
+            if !(before > 0) {
+                return Err(Error::Client(
+                    "`beforeCheckpoint` must be greater than 0".to_string(),
+                ));
+            }
         }
 
         if let (Some(after), Some(before)) = (self.after_checkpoint, self.before_checkpoint) {
             // Because `after` and `before` are both exclusive, they must be at least one apart if
             // both are provided.
-            consistent &= after + 1 < before;
+            if !(after + 1 < before) {
+                return Err(Error::Client(
+                    "`afterCheckpoint` must be less than `beforeCheckpoint`".to_string(),
+                ));
+            }
         }
 
         if let (Some(after), Some(at)) = (self.after_checkpoint, self.at_checkpoint) {
-            is_consistent &= after < at;
+            if !(after < at) {
+                return Err(Error::Client(
+                    "`afterCheckpoint` must be less than `atCheckpoint`".to_string(),
+                ));
+            }
         }
 
         if let (Some(at), Some(before)) = (self.at_checkpoint, self.before_checkpoint) {
-            is_consistent &= at < before;
+            if !(at < before) {
+                return Err(Error::Client(
+                    "`atCheckpoint` must be less than `beforeCheckpoint`".to_string(),
+                ));
+            }
         }
 
         if let (Some(TransactionBlockKindInput::SystemTx), Some(signer)) =
             (self.kind, self.sign_address)
         {
-            is_consistent &= signer == SuiAddress::from(NativeSuiAddress::ZERO);
+            if !(signer == SuiAddress::from(NativeSuiAddress::ZERO)) {
+                return Err(Error::Client(
+                    "System transactions cannot have a sender".to_string(),
+                ));
+            }
         }
 
-        is_consistent
+        Ok(())
+    }
+}
+
+impl TxLookupBound {
+    pub(crate) fn from_range(range: (Option<u64>, Option<u64>)) -> Self {
+        TxLookupBound::Range(range)
+    }
+
+    pub(crate) fn from_set(ids: Vec<u64>) -> Self {
+        TxLookupBound::Set(ids)
     }
 }
 
@@ -675,6 +673,40 @@ impl Target<Cursor> for StoredTransaction {
 impl Checkpointed for Cursor {
     fn checkpoint_viewed_at(&self) -> u64 {
         self.checkpoint_viewed_at
+    }
+}
+
+impl Target<Cursor> for TxLookup {
+    fn cursor(&self, checkpoint_viewed_at: u64) -> Cursor {
+        Cursor::new(TransactionBlockCursor {
+            tx_sequence_number: self.tx_sequence_number as u64,
+            tx_checkpoint_number: 0, // TODO (wlmyng)
+            checkpoint_viewed_at,
+        })
+    }
+}
+
+impl RawPaginated<Cursor> for TxLookup {
+    fn filter_ge(cursor: &Cursor, query: RawQuery) -> RawQuery {
+        filter!(
+            query,
+            format!("tx_sequence_number >= {}", cursor.tx_sequence_number)
+        )
+    }
+
+    fn filter_le(cursor: &Cursor, query: RawQuery) -> RawQuery {
+        filter!(
+            query,
+            format!("tx_sequence_number <= {}", cursor.tx_sequence_number)
+        )
+    }
+
+    fn order(asc: bool, query: RawQuery) -> RawQuery {
+        if asc {
+            query.order_by("tx_sequence_number ASC")
+        } else {
+            query.order_by("tx_sequence_number DESC")
+        }
     }
 }
 
@@ -788,13 +820,8 @@ impl TryFrom<TransactionBlockEffects> for TransactionBlock {
     }
 }
 
-pub(crate) fn select_tx(
-    sender: Option<SuiAddress>,
-    lo: Option<u64>,
-    hi: Option<u64>,
-    from: &str,
-) -> RawQuery {
-    let mut query = query!("SELECT tx_sequence_number FROM ", from);
+pub(crate) fn select_tx(sender: Option<SuiAddress>, bound: &TxLookupBound, from: &str) -> RawQuery {
+    let mut query = query!(format!("SELECT tx_sequence_number FROM {}", from));
 
     if let Some(sender) = sender {
         query = filter!(
@@ -803,39 +830,51 @@ pub(crate) fn select_tx(
         );
     }
 
-    if let Some(lo) = lo {
-        query = filter!(query, format!("tx_sequence_number >= {}"), lo);
-    }
+    match bound {
+        TxLookupBound::Range((lo, hi)) => {
+            if let Some(lo) = lo {
+                query = filter!(query, format!("tx_sequence_number >= {}", lo));
+            }
 
-    if let Some(hi) = hi {
-        query = filter!(query, format!("tx_sequence_number <= {}"), hi);
+            if let Some(hi) = hi {
+                query = filter!(query, format!("tx_sequence_number <= {}", hi));
+            }
+        }
+        TxLookupBound::Set(ids) => {
+            let mut inner = String::new();
+            let mut prefix = "tx_sequence_number IN (";
+            for id in ids {
+                write!(&mut inner, "{prefix}{}", id).unwrap();
+                prefix = ",";
+            }
+            inner.push(')');
+            query = filter!(query, inner);
+        }
     }
 
     query
 }
 
 pub(crate) fn select_pkg(
-    pkg: SuiAddress,
+    pkg: &SuiAddress,
     sender: Option<SuiAddress>,
-    lo: Option<u64>,
-    hi: Option<u64>,
+    bound: &TxLookupBound,
 ) -> RawQuery {
-    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_calls_pkg");
+    let query = select_tx(sender, bound, "amnn_0_hybrid_tx_calls_pkg");
 
     filter!(
         query,
-        format!("package = '\\x{}'::bytea", hex::encode(pkg.into_vec())),
+        format!("package = '\\x{}'::bytea", hex::encode(pkg.into_vec()))
     )
 }
 
 pub(crate) fn select_mod(
-    pkg: SuiAddress,
+    pkg: &SuiAddress,
     mod_: String,
     sender: Option<SuiAddress>,
-    lo: Option<u64>,
-    hi: Option<u64>,
+    bound: &TxLookupBound,
 ) -> RawQuery {
-    let mut query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_calls_mod");
+    let mut query = select_tx(sender, bound, "amnn_0_hybrid_tx_calls_mod");
 
     query = filter!(
         query,
@@ -845,22 +884,14 @@ pub(crate) fn select_mod(
     filter!(query, "module = {}", mod_)
 }
 
-//   (defn- select-fun [{:as params :keys [pkg mod fun]} lo hi]
-// (select-tx params lo hi +tx-calls-fun+
-//    [:and
-// [:= :package (hex->bytes pkg)]
-// [:= :module mod]
-// [:= :func fun]]))
-
 pub(crate) fn select_fun(
-    pkg: SuiAddress,
+    pkg: &SuiAddress,
     mod_: String,
     fun: String,
     sender: Option<SuiAddress>,
-    lo: Option<u64>,
-    hi: Option<u64>,
+    bound: &TxLookupBound,
 ) -> RawQuery {
-    let mut query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_calls_fun");
+    let mut query = select_tx(sender, bound, "amnn_0_hybrid_tx_calls_fun");
 
     query = filter!(
         query,
@@ -872,40 +903,22 @@ pub(crate) fn select_fun(
     filter!(query, "func = {}", fun)
 }
 
-//   (defn- select-kind [{:as params :keys [kind]} lo hi]
-// (select-tx params lo hi +tx-kinds+
-//    [:= :tx-kind ({:system 0 :programmable 1} kind)]))
-
-pub(crate) fn select_kind(
-    kind: TransactionBlockKindInput,
-    sender: Option<SuiAddress>,
-    lo: Option<u64>,
-    hi: Option<u64>,
-) -> RawQuery {
-    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_kinds");
+pub(crate) fn select_kind(kind: TransactionBlockKindInput, bound: &TxLookupBound) -> RawQuery {
+    let query = select_tx(None, bound, "amnn_0_hybrid_tx_kinds");
 
     filter!(query, format!("tx_kind = {}", kind as i16))
 }
 
-//   (defn- select-sender [params lo hi]
-// ;; The filter on `sender` is added by `select-tx` already.
-// (select-tx params lo hi +tx-senders+ true))
-
-pub(crate) fn select_sender(sender: SuiAddress, lo: Option<u64>, hi: Option<u64>) -> RawQuery {
-    select_tx(Some(sender), lo, hi, "amnn_0_hybrid_tx_senders")
+pub(crate) fn select_sender(sender: &SuiAddress, bound: &TxLookupBound) -> RawQuery {
+    select_tx(Some(*sender), bound, "amnn_0_hybrid_tx_senders")
 }
 
-//   (defn- select-recipient [{:as params :keys [recv]} lo hi]
-// (select-tx params lo hi +tx-recipients+
-//    [:= :recipient (hex->bytes recv)]))
-
 pub(crate) fn select_recipient(
-    recv: SuiAddress,
+    recv: &SuiAddress,
     sender: Option<SuiAddress>,
-    lo: Option<u64>,
-    hi: Option<u64>,
+    bound: &TxLookupBound,
 ) -> RawQuery {
-    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_recipients");
+    let query = select_tx(sender, bound, "amnn_0_hybrid_tx_recipients");
 
     filter!(
         query,
@@ -913,17 +926,12 @@ pub(crate) fn select_recipient(
     )
 }
 
-//   (defn- select-input [{:as params :keys [input]} lo hi]
-// (select-tx params lo hi +tx-input-objects+
-//    [:= :object-id (hex->bytes input)]))
-
 pub(crate) fn select_input(
-    input: SuiAddress,
+    input: &SuiAddress,
     sender: Option<SuiAddress>,
-    lo: Option<u64>,
-    hi: Option<u64>,
+    bound: &TxLookupBound,
 ) -> RawQuery {
-    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_input_objects");
+    let query = select_tx(sender, bound, "amnn_0_hybrid_tx_input_objects");
 
     filter!(
         query,
@@ -931,17 +939,12 @@ pub(crate) fn select_input(
     )
 }
 
-//   (defn- select-changed [{:as params :keys [changed]} lo hi]
-// (select-tx params lo hi +tx-changed-objects+
-//    [:= :object-id (hex->bytes changed)]))
-
 pub(crate) fn select_changed(
-    changed: SuiAddress,
+    changed: &SuiAddress,
     sender: Option<SuiAddress>,
-    lo: Option<u64>,
-    hi: Option<u64>,
+    bound: &TxLookupBound,
 ) -> RawQuery {
-    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_changed_objects");
+    let query = select_tx(sender, bound, "amnn_0_hybrid_tx_changed_objects");
 
     filter!(
         query,
@@ -952,19 +955,10 @@ pub(crate) fn select_changed(
     )
 }
 
-//   (defn- select-ids [{:as params :keys [ids]} lo hi]
-// (select-tx params lo hi +tx-digests+
-//    [:in :tx-digest (map b58/decode ids)]))
-
-pub(crate) fn select_ids(
-    ids: Vec<Digest>,
-    sender: Option<SuiAddress>,
-    lo: Option<u64>,
-    hi: Option<u64>,
-) -> RawQuery {
-    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_digests");
+pub(crate) fn select_ids(ids: &Vec<Digest>, bound: &TxLookupBound) -> RawQuery {
+    let query = select_tx(None, bound, "amnn_0_hybrid_tx_digests");
     if ids.is_empty() {
-        or_filter!("1=0");
+        filter!(query, "1=0")
     } else {
         let mut inner = String::new();
         let mut prefix = "tx_digest IN (";
@@ -978,6 +972,22 @@ pub(crate) fn select_ids(
             prefix = ",";
         }
         inner.push(')');
-        or_filter!(query, inner)
+        filter!(query, inner)
+    }
+}
+
+fn max_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a_val), Some(b_val)) => Some(std::cmp::max(a_val, b_val)),
+        (Some(val), None) | (None, Some(val)) => Some(val),
+        (None, None) => None,
+    }
+}
+
+fn min_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a_val), Some(b_val)) => Some(std::cmp::min(a_val, b_val)),
+        (Some(val), None) | (None, Some(val)) => Some(val),
+        (None, None) => None,
     }
 }

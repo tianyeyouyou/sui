@@ -514,7 +514,7 @@ macro_rules! for_all_tables {
             amnn_0_hybrid_tx_changed_objects,
             amnn_0_hybrid_tx_digests,
             amnn_0_hybrid_tx_kinds,
-            amnn_0_hybrid_cp_tx,
+            amnn_0_hybrid_cp_tx
         );
     };
 }

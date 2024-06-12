@@ -241,6 +241,7 @@ pub(crate) struct HistoricalObjectCursor {
         arg(name = "last", ty = "Option<u64>"),
         arg(name = "before", ty = "Option<transaction_block::Cursor>"),
         arg(name = "filter", ty = "Option<TransactionBlockFilter>"),
+        arg(name = "within_checkpoints", ty = "Option<u64>"),
         ty = "Connection<String, TransactionBlock>",
         desc = "The transaction blocks that sent objects to this object."
     ),
@@ -432,9 +433,18 @@ impl Object {
         last: Option<u64>,
         before: Option<transaction_block::Cursor>,
         filter: Option<TransactionBlockFilter>,
+        within_checkpoints: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>> {
         ObjectImpl(self)
-            .received_transaction_blocks(ctx, first, after, last, before, filter)
+            .received_transaction_blocks(
+                ctx,
+                first,
+                after,
+                last,
+                before,
+                filter,
+                within_checkpoints,
+            )
             .await
     }
 
@@ -592,6 +602,7 @@ impl ObjectImpl<'_> {
         last: Option<u64>,
         before: Option<transaction_block::Cursor>,
         filter: Option<TransactionBlockFilter>,
+        within_checkpoints: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>> {
         let page = Page::from_params(ctx.data_unchecked(), first, after, last, before)?;
 
@@ -606,10 +617,11 @@ impl ObjectImpl<'_> {
         };
 
         TransactionBlock::paginate(
-            ctx.data_unchecked(),
+            ctx,
             page,
             filter,
             self.0.checkpoint_viewed_at,
+            Some(within_checkpoints.unwrap_or(10000000)),
         )
         .await
         .extend()

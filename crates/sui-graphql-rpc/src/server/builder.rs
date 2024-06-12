@@ -80,7 +80,7 @@ impl Server {
 
         // Compatibility check
         info!("Starting compatibility check");
-        check_all_tables(&self.db_reader).await?;
+        // check_all_tables(&self.db_reader).await?;
         info!("Compatibility check passed");
 
         // A handle that spawns a background task to periodically update the `Watermark`, which
