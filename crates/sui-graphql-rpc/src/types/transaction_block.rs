@@ -33,6 +33,8 @@ use crate::{
     consistency::Checkpointed,
     data::{self, DataLoader, Db, DbConnection, QueryExecutor},
     error::Error,
+    filter, or_filter, query,
+    raw_query::RawQuery,
     server::watermark_task::Watermark,
     types::intersect,
 };
@@ -404,6 +406,151 @@ impl TransactionBlock {
 
         Ok(conn)
     }
+
+    pub(crate) async fn paginate_v2(
+        db: &Db,
+        page: Page<Cursor>,
+        filter: TransactionBlockFilter,
+        checkpoint_viewed_at: u64,
+        scan_limit: Option<u64>,
+    ) -> Result<Connection<String, TransactionBlock>, Error> {
+        use transactions as tx;
+
+        let cursor_viewed_at = page.validate_cursor_consistency()?;
+        let checkpoint_viewed_at = cursor_viewed_at.unwrap_or(checkpoint_viewed_at);
+
+        let (prev, next, results) = db
+            .execute(move |conn| {
+                page.paginate_query::<StoredTransaction, _, _, _>(
+                    conn,
+                    checkpoint_viewed_at,
+                    move || {
+                        let mut query = tx::dsl::transactions.into_boxed();
+
+                        if let Some(f) = &filter.function {
+                            let sub_query = tx_calls::dsl::tx_calls
+                                .select(tx_calls::dsl::tx_sequence_number)
+                                .into_boxed();
+
+                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(f.apply(
+                                sub_query,
+                                tx_calls::dsl::package,
+                                tx_calls::dsl::module,
+                                tx_calls::dsl::func,
+                            )));
+                        }
+
+                        if let Some(k) = &filter.kind {
+                            query = query.filter(tx::dsl::transaction_kind.eq(*k as i16))
+                        }
+
+                        if let Some(c) = &filter.after_checkpoint {
+                            query = query.filter(tx::dsl::checkpoint_sequence_number.gt(*c as i64));
+                        }
+
+                        if let Some(c) = &filter.at_checkpoint {
+                            query = query.filter(tx::dsl::checkpoint_sequence_number.eq(*c as i64));
+                        }
+
+                        let before_checkpoint = filter
+                            .before_checkpoint
+                            .map_or(checkpoint_viewed_at + 1, |c| {
+                                c.min(checkpoint_viewed_at + 1)
+                            });
+                        query = query.filter(
+                            tx::dsl::checkpoint_sequence_number.lt(before_checkpoint as i64),
+                        );
+
+                        if let Some(a) = &filter.sign_address {
+                            let sub_query = tx_senders::dsl::tx_senders
+                                .select(tx_senders::dsl::tx_sequence_number)
+                                .filter(tx_senders::dsl::sender.eq(a.into_vec()));
+                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
+                        }
+
+                        if let Some(a) = &filter.recv_address {
+                            let sub_query = tx_recipients::dsl::tx_recipients
+                                .select(tx_recipients::dsl::tx_sequence_number)
+                                .filter(tx_recipients::dsl::recipient.eq(a.into_vec()));
+                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
+                        }
+
+                        if let Some(o) = &filter.input_object {
+                            let sub_query = tx_input_objects::dsl::tx_input_objects
+                                .select(tx_input_objects::dsl::tx_sequence_number)
+                                .filter(tx_input_objects::dsl::object_id.eq(o.into_vec()));
+                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
+                        }
+
+                        if let Some(o) = &filter.changed_object {
+                            let sub_query = tx_changed_objects::dsl::tx_changed_objects
+                                .select(tx_changed_objects::dsl::tx_sequence_number)
+                                .filter(tx_changed_objects::dsl::object_id.eq(o.into_vec()));
+                            query = query.filter(tx::dsl::tx_sequence_number.eq_any(sub_query));
+                        }
+
+                        if let Some(txs) = &filter.transaction_ids {
+                            let digests: Vec<_> = txs.iter().map(|d| d.to_vec()).collect();
+                            query = query.filter(tx::dsl::transaction_digest.eq_any(digests));
+                        }
+
+                        query
+                    },
+                )
+            })
+            .await?;
+
+        let mut conn = Connection::new(prev, next);
+
+        // The "checkpoint viewed at" sets a consistent upper bound for the nested queries.
+        for stored in results {
+            let cursor = stored.cursor(checkpoint_viewed_at).encode_cursor();
+            let inner = TransactionBlockInner::try_from(stored)?;
+            let transaction = TransactionBlock {
+                inner,
+                checkpoint_viewed_at,
+            };
+            conn.edges.push(Edge::new(cursor, transaction));
+        }
+
+        Ok(conn)
+    }
+
+    pub(crate) async fn my_head(
+        db: &Db,
+        page: Page<Cursor>,
+        filter: TransactionBlockFilter,
+        checkpoint_viewed_at: u64,
+        scan_limit: Option<u64>,
+    ) {
+        // handle inconsistencies - immediately return empty result
+
+        if !filter.is_consistent() {
+            return None;
+        }
+
+        use transactions::dsl as tx;
+        // determine upper and lower bounds, apply scan limit
+
+        // do the queries for tx_sequence_number
+        if filter.is_single_filter() {
+            let transactions: Vec<StoredTransaction> = db.execute_repeatable(move |conn| {
+                // fetch tx_sequence_number
+                let tx_sequence_numbers = vec![1, 2, 3, 4, 5];
+
+                // then just do a multi-get
+                let transactions = conn.results(move || {
+                    tx::transactions.filter(tx::tx_sequence_number.eq_any(tx_sequence_numbers))
+                });
+
+                transactions
+            });
+        }
+
+        None
+
+        // finally, the multi-get
+    }
 }
 
 impl TransactionBlockFilter {
@@ -437,6 +584,50 @@ impl TransactionBlockFilter {
                 Some(a.intersection(&b).cloned().collect())
             })?,
         })
+    }
+
+    pub(crate) fn is_single_filter(self) -> bool {
+        let filters_count = [
+            self.recv_address.is_some(),
+            self.input_object.is_some(),
+            self.changed_object.is_some(),
+            self.function.is_some(),
+        ]
+        .iter()
+        .filter(|&is_set| *is_set)
+        .count();
+
+        filters_count <= 1
+    }
+
+    pub(crate) fn is_consistent(self) -> bool {
+        let mut consistent = true;
+
+        if let Some(before) = self.before_checkpoint {
+            consistent &= Some(before) > 0;
+        }
+
+        if let (Some(after), Some(before)) = (self.after_checkpoint, self.before_checkpoint) {
+            // Because `after` and `before` are both exclusive, they must be at least one apart if
+            // both are provided.
+            consistent &= after + 1 < before;
+        }
+
+        if let (Some(after), Some(at)) = (self.after_checkpoint, self.at_checkpoint) {
+            is_consistent &= after < at;
+        }
+
+        if let (Some(at), Some(before)) = (self.at_checkpoint, self.before_checkpoint) {
+            is_consistent &= at < before;
+        }
+
+        if let (Some(TransactionBlockKindInput::SystemTx), Some(signer)) =
+            (self.kind, self.sign_address)
+        {
+            is_consistent &= signer == SuiAddress::from(NativeSuiAddress::ZERO);
+        }
+
+        is_consistent
     }
 }
 
@@ -594,5 +785,199 @@ impl TryFrom<TransactionBlockEffects> for TransactionBlock {
             inner,
             checkpoint_viewed_at,
         })
+    }
+}
+
+pub(crate) fn select_tx(
+    sender: Option<SuiAddress>,
+    lo: Option<u64>,
+    hi: Option<u64>,
+    from: &str,
+) -> RawQuery {
+    let mut query = query!("SELECT tx_sequence_number FROM ", from);
+
+    if let Some(sender) = sender {
+        query = filter!(
+            query,
+            format!("sender = '\\x{}'::bytea", hex::encode(sender.into_vec()))
+        );
+    }
+
+    if let Some(lo) = lo {
+        query = filter!(query, format!("tx_sequence_number >= {}"), lo);
+    }
+
+    if let Some(hi) = hi {
+        query = filter!(query, format!("tx_sequence_number <= {}"), hi);
+    }
+
+    query
+}
+
+pub(crate) fn select_pkg(
+    pkg: SuiAddress,
+    sender: Option<SuiAddress>,
+    lo: Option<u64>,
+    hi: Option<u64>,
+) -> RawQuery {
+    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_calls_pkg");
+
+    filter!(
+        query,
+        format!("package = '\\x{}'::bytea", hex::encode(pkg.into_vec())),
+    )
+}
+
+pub(crate) fn select_mod(
+    pkg: SuiAddress,
+    mod_: String,
+    sender: Option<SuiAddress>,
+    lo: Option<u64>,
+    hi: Option<u64>,
+) -> RawQuery {
+    let mut query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_calls_mod");
+
+    query = filter!(
+        query,
+        format!("package = '\\x{}'::bytea", hex::encode(pkg.into_vec()))
+    );
+
+    filter!(query, "module = {}", mod_)
+}
+
+//   (defn- select-fun [{:as params :keys [pkg mod fun]} lo hi]
+// (select-tx params lo hi +tx-calls-fun+
+//    [:and
+// [:= :package (hex->bytes pkg)]
+// [:= :module mod]
+// [:= :func fun]]))
+
+pub(crate) fn select_fun(
+    pkg: SuiAddress,
+    mod_: String,
+    fun: String,
+    sender: Option<SuiAddress>,
+    lo: Option<u64>,
+    hi: Option<u64>,
+) -> RawQuery {
+    let mut query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_calls_fun");
+
+    query = filter!(
+        query,
+        format!("package = '\\x{}'::bytea", hex::encode(pkg.into_vec()))
+    );
+
+    query = filter!(query, "module = {}", mod_);
+
+    filter!(query, "func = {}", fun)
+}
+
+//   (defn- select-kind [{:as params :keys [kind]} lo hi]
+// (select-tx params lo hi +tx-kinds+
+//    [:= :tx-kind ({:system 0 :programmable 1} kind)]))
+
+pub(crate) fn select_kind(
+    kind: TransactionBlockKindInput,
+    sender: Option<SuiAddress>,
+    lo: Option<u64>,
+    hi: Option<u64>,
+) -> RawQuery {
+    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_kinds");
+
+    filter!(query, format!("tx_kind = {}", kind as i16))
+}
+
+//   (defn- select-sender [params lo hi]
+// ;; The filter on `sender` is added by `select-tx` already.
+// (select-tx params lo hi +tx-senders+ true))
+
+pub(crate) fn select_sender(sender: SuiAddress, lo: Option<u64>, hi: Option<u64>) -> RawQuery {
+    select_tx(Some(sender), lo, hi, "amnn_0_hybrid_tx_senders")
+}
+
+//   (defn- select-recipient [{:as params :keys [recv]} lo hi]
+// (select-tx params lo hi +tx-recipients+
+//    [:= :recipient (hex->bytes recv)]))
+
+pub(crate) fn select_recipient(
+    recv: SuiAddress,
+    sender: Option<SuiAddress>,
+    lo: Option<u64>,
+    hi: Option<u64>,
+) -> RawQuery {
+    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_recipients");
+
+    filter!(
+        query,
+        format!("recipient = '\\x{}'::bytea", hex::encode(recv.into_vec()))
+    )
+}
+
+//   (defn- select-input [{:as params :keys [input]} lo hi]
+// (select-tx params lo hi +tx-input-objects+
+//    [:= :object-id (hex->bytes input)]))
+
+pub(crate) fn select_input(
+    input: SuiAddress,
+    sender: Option<SuiAddress>,
+    lo: Option<u64>,
+    hi: Option<u64>,
+) -> RawQuery {
+    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_input_objects");
+
+    filter!(
+        query,
+        format!("object_id = '\\x{}'::bytea", hex::encode(input.into_vec()))
+    )
+}
+
+//   (defn- select-changed [{:as params :keys [changed]} lo hi]
+// (select-tx params lo hi +tx-changed-objects+
+//    [:= :object-id (hex->bytes changed)]))
+
+pub(crate) fn select_changed(
+    changed: SuiAddress,
+    sender: Option<SuiAddress>,
+    lo: Option<u64>,
+    hi: Option<u64>,
+) -> RawQuery {
+    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_changed_objects");
+
+    filter!(
+        query,
+        format!(
+            "object_id = '\\x{}'::bytea",
+            hex::encode(changed.into_vec())
+        )
+    )
+}
+
+//   (defn- select-ids [{:as params :keys [ids]} lo hi]
+// (select-tx params lo hi +tx-digests+
+//    [:in :tx-digest (map b58/decode ids)]))
+
+pub(crate) fn select_ids(
+    ids: Vec<Digest>,
+    sender: Option<SuiAddress>,
+    lo: Option<u64>,
+    hi: Option<u64>,
+) -> RawQuery {
+    let query = select_tx(sender, lo, hi, "amnn_0_hybrid_tx_digests");
+    if ids.is_empty() {
+        or_filter!("1=0");
+    } else {
+        let mut inner = String::new();
+        let mut prefix = "tx_digest IN (";
+        for id in ids {
+            write!(
+                &mut inner,
+                "{prefix}'\\x{}'::bytea",
+                hex::encode(id.to_vec())
+            )
+            .unwrap();
+            prefix = ",";
+        }
+        inner.push(')');
+        or_filter!(query, inner)
     }
 }

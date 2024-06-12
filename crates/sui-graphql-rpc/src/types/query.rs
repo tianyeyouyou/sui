@@ -327,6 +327,34 @@ impl Query {
         .extend()
     }
 
+    /// The transaction blocks that exist in the network.
+    async fn transaction_blocks_v2(
+        &self,
+        ctx: &Context<'_>,
+        first: Option<u64>,
+        after: Option<transaction_block::Cursor>,
+        last: Option<u64>,
+        before: Option<transaction_block::Cursor>,
+        filter: Option<TransactionBlockFilter>,
+        scan_limit: Option<u64>,
+    ) -> Result<Connection<String, TransactionBlock>> {
+        let Watermark { checkpoint, .. } = *ctx.data()?;
+
+        // TODO(wlmyng): set as config
+        let scan_limit = scan_limit.unwrap_or(10000000);
+
+        let page = Page::from_params(ctx.data_unchecked(), first, after, last, before)?;
+        TransactionBlock::paginate_v2(
+            ctx.data_unchecked(),
+            page,
+            filter.unwrap_or_default(),
+            checkpoint,
+            Some(scan_limit),
+        )
+        .await
+        .extend()
+    }
+
     /// The events that exist in the network.
     async fn events(
         &self,
