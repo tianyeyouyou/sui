@@ -268,7 +268,7 @@ impl MoveObject {
         last: Option<u64>,
         before: Option<transaction_block::Cursor>,
         filter: Option<TransactionBlockFilter>,
-        within_checkpoints: Option<u64>,
+        scan_limit: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>> {
         ObjectImpl(&self.super_)
             .received_transaction_blocks(
@@ -278,7 +278,7 @@ impl MoveObject {
                 last,
                 before,
                 filter,
-                within_checkpoints,
+                scan_limit,
             )
             .await
     }

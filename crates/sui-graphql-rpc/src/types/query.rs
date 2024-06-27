@@ -313,7 +313,7 @@ impl Query {
         last: Option<u64>,
         before: Option<transaction_block::Cursor>,
         filter: Option<TransactionBlockFilter>,
-        within_checkpoints: Option<u64>,
+        scan_limit: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>> {
         let Watermark { checkpoint, .. } = *ctx.data()?;
 
@@ -323,7 +323,7 @@ impl Query {
             page,
             filter.unwrap_or_default(),
             checkpoint,
-            Some(within_checkpoints.unwrap_or(10000000)),
+            Some(scan_limit.unwrap_or(10000000)),
         )
         .await
         .extend()

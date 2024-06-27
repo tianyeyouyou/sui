@@ -179,6 +179,25 @@ macro_rules! or_filter {
     }};
 }
 
+/// Accepts two `Rawquery` instances and a third expression consisting of which columns to join on.
+#[macro_export]
+macro_rules! inner_join {
+    ($lhs:expr, $rhs:ident => ($rhs_query:expr, $alias:expr), using: [$using:expr $(, $more_using:expr)*]) => {{
+        use $crate::raw_query::RawQuery;
+
+        let (lhs_sql, mut binds) = $lhs.finish();
+        let (rhs_sql, rhs_binds) = $rhs_query.finish();
+
+        binds.extend(rhs_binds);
+
+        let aliased = format!("({}) AS {}", rhs_sql, $alias);
+        let using_clause = format!("USING ({})", stringify!($using $(, $more_using)*));
+        let sql = format!("{} INNER JOIN {} {}", lhs_sql, aliased, using_clause);
+
+        RawQuery::new(sql, binds)
+    }};
+}
+
 /// Accepts a `SELECT FROM` format string and optional subqueries. If subqueries are provided, there
 /// should be curly braces `{}` in the format string to interpolate each subquery's sql string into.
 /// Concatenates subqueries to the `SELECT FROM` clause, and creates a new `RawQuery` from the
@@ -191,20 +210,6 @@ macro_rules! query {
     ($select:expr) => {
         $crate::raw_query::RawQuery::new($select, vec![])
     };
-
-    // Handle a select clause with ongoing subquery and a new subquery with alias
-    ($select:expr, $ongoing_subquery:expr, aliased => ($new_subquery:expr, $alias:expr)) => {{
-        use $crate::raw_query::RawQuery;
-        let (ongoing_sql, mut ongoing_binds) = $ongoing_subquery.finish();
-        let (new_sql, new_binds) = $new_subquery.finish();
-
-        ongoing_binds.extend(new_binds);
-
-        let new_subquery_sql = format!("({}) AS {}", new_sql, $alias);
-        let select_formatted = format!($select, ongoing_sql, new_subquery_sql);
-
-        RawQuery::new(select_formatted, ongoing_binds)
-    }};
 
     // Expects a select clause and one or more subqueries. The select clause should contain curly
     // braces for subqueries to be interpolated into. Use when the subqueries can be aliased

@@ -32,7 +32,7 @@ use crate::{
     consistency::Checkpointed,
     data::{self, DataLoader, Db, DbConnection, QueryExecutor},
     error::Error,
-    filter, query,
+    filter, inner_join, query,
     raw_query::RawQuery,
     server::watermark_task::Watermark,
     tx_lookups::{
@@ -307,13 +307,14 @@ impl TransactionBlock {
     /// the cursor if they are consistent.
     ///
     /// Filters that involve a combination of `recvAddress`, `inputObject`, `changedObject`, and
-    /// `function` should provide a value for `within_checkpoints`.
+    /// `function` should provide a value for `scan_limit`. This indicates how many transactions to
+    /// scan through per the filter conditions.
     pub(crate) async fn paginate(
         ctx: &Context<'_>,
         page: Page<Cursor>,
         filter: TransactionBlockFilter,
         checkpoint_viewed_at: u64,
-        within_checkpoints: Option<u64>,
+        scan_limit: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>, Error> {
         filter.is_consistent()?;
         // If cursors are provided, defer to the `checkpoint_viewed_at` in the cursor if they are
@@ -344,10 +345,10 @@ impl TransactionBlock {
         )
         .unwrap();
 
-        // If `within_checkpoints` is set, we need to adjust the lower and upper bounds. It is up to
-        // the caller of `TransactionBlock::paginate` to determine whether `within_checkpoints` is
+        // If `scan_limit` is set, we need to adjust the lower and upper bounds. It is up to
+        // the caller of `TransactionBlock::paginate` to determine whether `scan_limit` is
         // required.
-        if let Some(scan_limit) = within_checkpoints {
+        if let Some(scan_limit) = scan_limit {
             if page.is_from_front() {
                 hi_cp = std::cmp::min(hi_cp, lo_cp.saturating_add(scan_limit));
             } else {
@@ -362,7 +363,6 @@ impl TransactionBlock {
 
         let (prev, next, transactions): (bool, bool, Vec<StoredTransaction>) = db
             .execute_repeatable(move |conn| {
-
                 // The min or first `tx_sequence_number` of a checkpoint is the previous
                 // checkpoint's `network_total_transactions`. Because this refers to a historical
                 // checkpoint, if we yield a `None` result, we can return early.
@@ -370,11 +370,12 @@ impl TransactionBlock {
                     0 => 0,
                     _ => {
                         let sequence_number: Option<i64> = conn
-                        .first(move || {
-                            cp::checkpoints
-                                .select(cp::network_total_transactions)
-                                .filter(cp::sequence_number.eq((lo_cp - 1) as i64))
-                        }).optional()?;
+                            .first(move || {
+                                cp::checkpoints
+                                    .select(cp::network_total_transactions)
+                                    .filter(cp::sequence_number.eq((lo_cp - 1) as i64))
+                            })
+                            .optional()?;
 
                         match sequence_number {
                             Some(sequence_number) => sequence_number as u64,
@@ -393,7 +394,8 @@ impl TransactionBlock {
                             cp::checkpoints
                                 .select(cp::network_total_transactions)
                                 .filter(cp::sequence_number.eq(hi_cp as i64))
-                        }).optional()?;
+                        })
+                        .optional()?;
 
                     match sequence_number {
                         Some(sequence_number) => (sequence_number as u64).saturating_sub(1),
@@ -408,8 +410,17 @@ impl TransactionBlock {
                 // If `transaction_ids` is specified, we can use that in lieu of the range under the
                 // assumption that it will further constrain the rows we look up.
                 if let Some(txs) = &filter.transaction_ids {
-                    let transaction_ids: Vec<TxLookup> = conn.results(move || select_ids(txs, &bound).into_boxed())?;
-                    bound = TxLookupBound::from_set(transaction_ids.into_iter().map(|tx| tx.tx_sequence_number as u64).collect());
+                    let transaction_ids: Vec<TxLookup> =
+                        conn.results(move || select_ids(txs, &bound).into_boxed())?;
+                    if transaction_ids.is_empty() {
+                        return Ok::<_, diesel::result::Error>((false, false, vec![]));
+                    }
+                    bound = TxLookupBound::from_set(
+                        transaction_ids
+                            .into_iter()
+                            .map(|tx| tx.tx_sequence_number as u64)
+                            .collect(),
+                    );
                 }
 
                 let mut subqueries = vec![];
@@ -455,11 +466,9 @@ impl TransactionBlock {
                         subqueries.push((select_sender(sender, &bound), "tx_senders"));
                     }
                     // And if there are no filters at all, we can operate directly on the main table
+                    // TODO (wlmyng): at this point we can directly make the query. we just need to produce the `tx_sequence_numbers: Vec<i64>`
                     else {
-                        subqueries.push((
-                            select_tx(None, &bound, "transactions"),
-                            "transactions",
-                        ));
+                        subqueries.push((select_tx(None, &bound, "transactions"), "transactions"));
                     }
                 }
 
@@ -474,13 +483,9 @@ impl TransactionBlock {
                 let mut subquery = subqueries.pop().unwrap().0;
 
                 if !subqueries.is_empty() {
-                    subquery = query!(
-                        "SELECT tx_sequence_number FROM ({}) AS initial",
-                        subquery
-                    );
+                    subquery = query!("SELECT tx_sequence_number FROM ({}) AS initial", subquery);
                     while let Some((subselect, alias)) = subqueries.pop() {
-                        subquery =
-                            query!("{} INNER JOIN {} USING (tx_sequence_number)", subquery, aliased => (subselect, alias));
+                        subquery = inner_join!(subquery, rhs => (subselect, alias), using: ["tx_sequence_number"]);
                     }
                 }
 
@@ -491,9 +496,7 @@ impl TransactionBlock {
 
                 let tx_sequence_numbers = results
                     .into_iter()
-                    .map(|x| {
-                        x.tx_sequence_number
-                    })
+                    .map(|x| x.tx_sequence_number)
                     .collect::<Vec<i64>>();
 
                 // then just do a multi-get
@@ -570,7 +573,7 @@ impl TransactionBlockFilter {
 
     pub(crate) fn is_consistent(&self) -> Result<(), Error> {
         if let Some(before) = self.before_checkpoint {
-            if before <= 0 {
+            if before == 0 {
                 return Err(Error::Client(
                     "`beforeCheckpoint` must be greater than 0".to_string(),
                 ));
