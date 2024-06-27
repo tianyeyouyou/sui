@@ -375,102 +375,6 @@ diesel::table! {
     }
 }
 
-diesel::table! {
-    amnn_0_hybrid_transactions (tx_sequence_number) {
-        tx_sequence_number -> Int8,
-        transaction_digest -> Bytea,
-        raw_transaction -> Bytea,
-        raw_effects -> Bytea,
-        checkpoint_sequence_number -> Int8,
-        timestamp_ms -> Int8,
-        object_changes -> Array<Nullable<Bytea>>,
-        balance_changes -> Array<Nullable<Bytea>>,
-        events -> Array<Nullable<Bytea>>,
-        transaction_kind -> Int2,
-        success_command_count -> Int2,
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_tx_calls_pkg (package, tx_sequence_number) {
-        package -> Bytea,
-        tx_sequence_number -> Int8,
-        sender -> Bytea,
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_tx_calls_mod (package, module, tx_sequence_number) {
-        package -> Bytea,
-        module -> Text,
-        tx_sequence_number -> Int8,
-        sender -> Bytea,
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_tx_calls_fun (package, module, func, tx_sequence_number) {
-        package -> Bytea,
-        module -> Text,
-        func -> Text,
-        tx_sequence_number -> Int8,
-        sender -> Bytea,
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_tx_senders (sender, tx_sequence_number) {
-        sender -> Bytea,
-        tx_sequence_number -> Int8,
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_tx_recipients (recipient, tx_sequence_number) {
-        recipient -> Bytea,
-        tx_sequence_number -> Int8,
-        sender -> Bytea
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_tx_input_objects (object_id, tx_sequence_number) {
-        object_id -> Bytea,
-        tx_sequence_number -> Int8,
-        sender -> Bytea
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_tx_changed_objects (object_id, tx_sequence_number) {
-        object_id -> Bytea,
-        tx_sequence_number -> Int8,
-        sender -> Bytea
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_tx_digests (tx_digest) {
-        tx_digest -> Bytea,
-        tx_sequence_number -> Int8,
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_tx_kinds (tx_kind, tx_sequence_number) {
-        tx_kind -> Int2,
-        tx_sequence_number -> Int8,
-    }
-}
-
-diesel::table! {
-    amnn_0_hybrid_cp_tx (checkpoint_sequence_number) {
-        checkpoint_sequence_number -> Int8,
-        min_tx_sequence_number -> Int8,
-        max_tx_sequence_number -> Int8,
-    }
-}
-
 #[macro_export]
 macro_rules! for_all_tables {
     ($action:path) => {
@@ -503,18 +407,7 @@ macro_rules! for_all_tables {
             tx_input_objects,
             tx_kinds,
             tx_recipients,
-            tx_senders,
-            amnn_0_hybrid_transactions,
-            amnn_0_hybrid_tx_calls_pkg,
-            amnn_0_hybrid_tx_calls_mod,
-            amnn_0_hybrid_tx_calls_fun,
-            amnn_0_hybrid_tx_senders,
-            amnn_0_hybrid_tx_recipients,
-            amnn_0_hybrid_tx_input_objects,
-            amnn_0_hybrid_tx_changed_objects,
-            amnn_0_hybrid_tx_digests,
-            amnn_0_hybrid_tx_kinds,
-            amnn_0_hybrid_cp_tx
+            tx_senders
         );
     };
 }

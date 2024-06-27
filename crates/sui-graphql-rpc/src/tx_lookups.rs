@@ -63,7 +63,7 @@ pub(crate) fn select_pkg(
     sender: Option<SuiAddress>,
     bound: &TxLookupBound,
 ) -> RawQuery {
-    let query = select_tx(sender, bound, "amnn_0_hybrid_tx_calls_pkg");
+    let query = select_tx(sender, bound, "tx_calls_pkg");
 
     filter!(
         query,
@@ -77,7 +77,7 @@ pub(crate) fn select_mod(
     sender: Option<SuiAddress>,
     bound: &TxLookupBound,
 ) -> RawQuery {
-    let mut query = select_tx(sender, bound, "amnn_0_hybrid_tx_calls_mod");
+    let mut query = select_tx(sender, bound, "tx_calls_mod");
 
     query = filter!(
         query,
@@ -94,7 +94,7 @@ pub(crate) fn select_fun(
     sender: Option<SuiAddress>,
     bound: &TxLookupBound,
 ) -> RawQuery {
-    let mut query = select_tx(sender, bound, "amnn_0_hybrid_tx_calls_fun");
+    let mut query = select_tx(sender, bound, "tx_calls_fun");
 
     query = filter!(
         query,
@@ -107,13 +107,13 @@ pub(crate) fn select_fun(
 }
 
 pub(crate) fn select_kind(kind: TransactionBlockKindInput, bound: &TxLookupBound) -> RawQuery {
-    let query = select_tx(None, bound, "amnn_0_hybrid_tx_kinds");
+    let query = select_tx(None, bound, "tx_kinds");
 
     filter!(query, format!("tx_kind = {}", kind as i16))
 }
 
 pub(crate) fn select_sender(sender: &SuiAddress, bound: &TxLookupBound) -> RawQuery {
-    select_tx(Some(*sender), bound, "amnn_0_hybrid_tx_senders")
+    select_tx(Some(*sender), bound, "tx_senders")
 }
 
 pub(crate) fn select_recipient(
@@ -121,7 +121,7 @@ pub(crate) fn select_recipient(
     sender: Option<SuiAddress>,
     bound: &TxLookupBound,
 ) -> RawQuery {
-    let query = select_tx(sender, bound, "amnn_0_hybrid_tx_recipients");
+    let query = select_tx(sender, bound, "tx_recipients");
 
     filter!(
         query,
@@ -134,7 +134,7 @@ pub(crate) fn select_input(
     sender: Option<SuiAddress>,
     bound: &TxLookupBound,
 ) -> RawQuery {
-    let query = select_tx(sender, bound, "amnn_0_hybrid_tx_input_objects");
+    let query = select_tx(sender, bound, "tx_input_objects");
 
     filter!(
         query,
@@ -147,7 +147,7 @@ pub(crate) fn select_changed(
     sender: Option<SuiAddress>,
     bound: &TxLookupBound,
 ) -> RawQuery {
-    let query = select_tx(sender, bound, "amnn_0_hybrid_tx_changed_objects");
+    let query = select_tx(sender, bound, "tx_changed_objects");
 
     filter!(
         query,
@@ -159,7 +159,7 @@ pub(crate) fn select_changed(
 }
 
 pub(crate) fn select_ids(ids: &Vec<Digest>, bound: &TxLookupBound) -> RawQuery {
-    let query = select_tx(None, bound, "amnn_0_hybrid_tx_digests");
+    let query = select_tx(None, bound, "tx_digests");
     if ids.is_empty() {
         filter!(query, "1=0")
     } else {

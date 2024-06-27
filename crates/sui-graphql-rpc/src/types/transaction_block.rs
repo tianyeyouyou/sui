@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use sui_indexer::{
     models::transactions::StoredTransaction,
-    schema::{amnn_0_hybrid_cp_tx, amnn_0_hybrid_transactions, transactions, tx_digests},
+    schema::{checkpoints, transactions, tx_digests},
 };
 use sui_types::{
     base_types::SuiAddress as NativeSuiAddress,
@@ -130,9 +130,6 @@ pub(crate) struct TransactionBlockCursor {
     pub checkpoint_viewed_at: u64,
     #[serde(rename = "t")]
     pub tx_sequence_number: u64,
-    /// The checkpoint sequence number when the transaction was finalized.
-    #[serde(rename = "tc")]
-    pub tx_checkpoint_number: u64,
 }
 
 /// DataLoader key for fetching a `TransactionBlock` by its digest, optionally constrained by a
@@ -319,99 +316,97 @@ impl TransactionBlock {
         within_checkpoints: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>, Error> {
         filter.is_consistent()?;
+        // If cursors are provided, defer to the `checkpoint_viewed_at` in the cursor if they are
+        // consistent. Otherwise, use the value from the parameter, or set to None. This is so that
+        // paginated queries are consistent with the previous query that created the cursor.
+        let cursor_viewed_at = page.validate_cursor_consistency()?;
+        let checkpoint_viewed_at = cursor_viewed_at.unwrap_or(checkpoint_viewed_at);
 
         let db: &Db = ctx.data_unchecked();
 
-        // Anchor the lower and upper checkpoint bounds on what is provided in the filter. Increment
+        // Anchor the lower and upper checkpoint bounds if provided from the filter, otherwise
+        // default the lower bound to 0 and the upper bound to `checkpoint_viewed_at`. Increment
         // `after` by 1 so that we can uniformly select the `min_tx_sequence_number` for the lower
         // bound. Similarly, decrement `before` by 1 so that we can uniformly select the
         // `max_tx_sequence_number`. In other words, the range consists of all transactions from the
         // smallest tx_sequence_number in lo_cp to the max tx_sequence_number in hi_cp.
-        let mut lo_cp = max_option(
+        let mut lo_cp = max_option!(
             filter.after_checkpoint.map(|x| x.saturating_add(1)),
             filter.at_checkpoint,
-        );
-        let mut hi_cp = min_option(
+            Some(0)
+        )
+        .unwrap(); // Safe to unwrap because of the `Some(0)` default
+
+        let mut hi_cp = min_option!(
             filter.at_checkpoint,
             filter.before_checkpoint.map(|x| x.saturating_sub(1)),
-        );
+            Some(checkpoint_viewed_at)
+        )
+        .unwrap();
 
         // If `within_checkpoints` is set, we need to adjust the lower and upper bounds. It is up to
         // the caller of `TransactionBlock::paginate` to determine whether `within_checkpoints` is
         // required.
         if let Some(scan_limit) = within_checkpoints {
             if page.is_from_front() {
-                hi_cp = min_option(hi_cp, Some(lo_cp.unwrap_or(0).saturating_add(scan_limit)));
+                hi_cp = std::cmp::min(hi_cp, lo_cp.saturating_add(scan_limit));
             } else {
                 // Similar to the `first` case, `checkpoint_viewed_at` offers a fixed point to
                 // determine how many more checkpoints to scan.
-                lo_cp = max_option(
-                    lo_cp,
-                    Some(
-                        hi_cp
-                            .unwrap_or(checkpoint_viewed_at)
-                            .saturating_sub(scan_limit),
-                    ),
-                );
+                lo_cp = std::cmp::max(lo_cp, hi_cp.saturating_sub(scan_limit));
             }
         }
 
-        use amnn_0_hybrid_cp_tx::dsl as cp;
-        use amnn_0_hybrid_transactions::dsl as tx;
+        use checkpoints::dsl as cp;
+        use transactions::dsl as tx;
 
         let (prev, next, transactions): (bool, bool, Vec<StoredTransaction>) = db
             .execute_repeatable(move |conn| {
 
-                // Map the lower and upper checkpoint bounds to their respective tx_sequence_number.
-                let lb_tx_seq_num = match lo_cp {
-                    Some(lb_value) => {
+                // The min or first `tx_sequence_number` of a checkpoint is the previous
+                // checkpoint's `network_total_transactions`. Because this refers to a historical
+                // checkpoint, if we yield a `None` result, we can return early.
+                let lo_tx = match lo_cp {
+                    0 => 0,
+                    _ => {
                         let sequence_number: Option<i64> = conn
-                            .first(move || {
-                                cp::amnn_0_hybrid_cp_tx
-                                    .select(cp::min_tx_sequence_number)
-                                    .filter(cp::checkpoint_sequence_number.eq(lb_value as i64))
-                            })
-                            .optional()?;
+                        .first(move || {
+                            cp::checkpoints
+                                .select(cp::network_total_transactions)
+                                .filter(cp::sequence_number.eq((lo_cp - 1) as i64))
+                        }).optional()?;
 
                         match sequence_number {
-                            Some(sequence_number) => Some(sequence_number as u64),
+                            Some(sequence_number) => sequence_number as u64,
                             None => return Ok::<_, diesel::result::Error>((false, false, vec![])),
                         }
                     }
-                    None => None,
                 };
-                let ub_tx_seq_num = match hi_cp {
-                    Some(ub_value) => {
-                        let sequence_number: Option<i64> = conn
-                            .first(move || {
-                                cp::amnn_0_hybrid_cp_tx
-                                    .select(cp::max_tx_sequence_number)
-                                    .filter(cp::checkpoint_sequence_number.eq(ub_value as i64))
-                            })
-                            .optional()?;
 
-                        match sequence_number {
-                            Some(sequence_number) => Some(sequence_number as u64),
-                            None => return Ok::<_, diesel::result::Error>((false, false, vec![])),
-                        }
+                // The max or last `tx_sequence_number` of a checkpoint is the current checkpoint's
+                // `network_total_transactions` - 1. Since we cap the upper bound to
+                // `checkpoint_viewed_at`, we should always yield a result; thus, we can also return
+                // early if result is `None`.
+                let hi_tx = {
+                    let sequence_number: Option<i64> = conn
+                        .first(move || {
+                            cp::checkpoints
+                                .select(cp::network_total_transactions)
+                                .filter(cp::sequence_number.eq(hi_cp as i64))
+                        }).optional()?;
+
+                    match sequence_number {
+                        Some(sequence_number) => (sequence_number as u64).saturating_sub(1),
+                        None => return Ok::<_, diesel::result::Error>((false, false, vec![])),
                     }
-                    None => None,
                 };
-
-                let before_cursor = page.before().map(|c| c.tx_sequence_number);
-                let after_cursor = page.after().map(|c| c.tx_sequence_number);
-
-                let lo = max_option(lb_tx_seq_num, after_cursor);
-                let hi = min_option(ub_tx_seq_num, before_cursor);
 
                 let sender = filter.sign_address;
 
-                // if tx_digests is specified, we can use that to further filter each subquery
-                // wonder if we can drop the `within_checkpoints` requirement if `transaction_ids`
-                // is specified?
+                let mut bound = TxLookupBound::from_range((Some(lo_tx), Some(hi_tx)));
 
-                let mut bound = TxLookupBound::from_range((lo, hi));
-
+                // If `transaction_ids` is specified, we can use that in lieu of the range under the
+                // assumption that it will further constrain the rows we look up.
                 if let Some(txs) = &filter.transaction_ids {
                     let transaction_ids: Vec<TxLookup> = conn.results(move || select_ids(txs, &bound).into_boxed())?;
                     bound = TxLookupBound::from_set(transaction_ids.into_iter().map(|tx| tx.tx_sequence_number as u64).collect());
@@ -436,7 +431,7 @@ impl TransactionBlock {
                     });
                 }
                 if let Some(kind) = &filter.kind {
-                    subqueries.push((select_kind(kind.clone(), &bound), "tx_kinds"));
+                    subqueries.push((select_kind(*kind, &bound), "tx_kinds"));
                     if let Some(sender) = &sender {
                         subqueries.push((select_sender(sender, &bound), "tx_senders"));
                     }
@@ -462,7 +457,7 @@ impl TransactionBlock {
                     // And if there are no filters at all, we can operate directly on the main table
                     else {
                         subqueries.push((
-                            select_tx(None, &bound, "amnn_0_hybrid_transactions"),
+                            select_tx(None, &bound, "transactions"),
                             "transactions",
                         ));
                     }
@@ -491,20 +486,19 @@ impl TransactionBlock {
 
                 // Issue the query to fetch the set of `tx_sequence_number` that will then be used
                 // to fetch remaining contents from the `transactions` table.
-
-                // TODO (wlmyng): this typing is a bit hacky, and we likely don't need it
-                println!("Submitting the query now");
                 let (prev, next, results) =
                     page.paginate_raw_query::<TxLookup>(conn, checkpoint_viewed_at, subquery)?;
 
                 let tx_sequence_numbers = results
                     .into_iter()
-                    .map(|x| x.tx_sequence_number)
+                    .map(|x| {
+                        x.tx_sequence_number
+                    })
                     .collect::<Vec<i64>>();
 
                 // then just do a multi-get
                 let transactions = conn.results(move || {
-                    tx::amnn_0_hybrid_transactions
+                    tx::transactions
                         .filter(tx::tx_sequence_number.eq_any(tx_sequence_numbers.clone()))
                 })?;
                 Ok::<_, diesel::result::Error>((prev, next, transactions))
@@ -576,7 +570,7 @@ impl TransactionBlockFilter {
 
     pub(crate) fn is_consistent(&self) -> Result<(), Error> {
         if let Some(before) = self.before_checkpoint {
-            if !(before > 0) {
+            if before <= 0 {
                 return Err(Error::Client(
                     "`beforeCheckpoint` must be greater than 0".to_string(),
                 ));
@@ -586,7 +580,7 @@ impl TransactionBlockFilter {
         if let (Some(after), Some(before)) = (self.after_checkpoint, self.before_checkpoint) {
             // Because `after` and `before` are both exclusive, they must be at least one apart if
             // both are provided.
-            if !(after + 1 < before) {
+            if after + 1 >= before {
                 return Err(Error::Client(
                     "`afterCheckpoint` must be less than `beforeCheckpoint`".to_string(),
                 ));
@@ -594,7 +588,7 @@ impl TransactionBlockFilter {
         }
 
         if let (Some(after), Some(at)) = (self.after_checkpoint, self.at_checkpoint) {
-            if !(after < at) {
+            if after >= at {
                 return Err(Error::Client(
                     "`afterCheckpoint` must be less than `atCheckpoint`".to_string(),
                 ));
@@ -602,7 +596,7 @@ impl TransactionBlockFilter {
         }
 
         if let (Some(at), Some(before)) = (self.at_checkpoint, self.before_checkpoint) {
-            if !(at < before) {
+            if at >= before {
                 return Err(Error::Client(
                     "`atCheckpoint` must be less than `beforeCheckpoint`".to_string(),
                 ));
@@ -612,7 +606,7 @@ impl TransactionBlockFilter {
         if let (Some(TransactionBlockKindInput::SystemTx), Some(signer)) =
             (self.kind, self.sign_address)
         {
-            if !(signer == SuiAddress::from(NativeSuiAddress::ZERO)) {
+            if signer != SuiAddress::from(NativeSuiAddress::ZERO) {
                 return Err(Error::Client(
                     "System transactions cannot have a sender".to_string(),
                 ));
@@ -627,21 +621,11 @@ impl Paginated<Cursor> for StoredTransaction {
     type Source = transactions::table;
 
     fn filter_ge<ST, GB>(cursor: &Cursor, query: Query<ST, GB>) -> Query<ST, GB> {
-        query
-            .filter(transactions::dsl::tx_sequence_number.ge(cursor.tx_sequence_number as i64))
-            .filter(
-                transactions::dsl::checkpoint_sequence_number
-                    .ge(cursor.tx_checkpoint_number as i64),
-            )
+        query.filter(transactions::dsl::tx_sequence_number.ge(cursor.tx_sequence_number as i64))
     }
 
     fn filter_le<ST, GB>(cursor: &Cursor, query: Query<ST, GB>) -> Query<ST, GB> {
-        query
-            .filter(transactions::dsl::tx_sequence_number.le(cursor.tx_sequence_number as i64))
-            .filter(
-                transactions::dsl::checkpoint_sequence_number
-                    .le(cursor.tx_checkpoint_number as i64),
-            )
+        query.filter(transactions::dsl::tx_sequence_number.le(cursor.tx_sequence_number as i64))
     }
 
     fn order<ST, GB>(asc: bool, query: Query<ST, GB>) -> Query<ST, GB> {
@@ -658,7 +642,6 @@ impl Target<Cursor> for StoredTransaction {
     fn cursor(&self, checkpoint_viewed_at: u64) -> Cursor {
         Cursor::new(TransactionBlockCursor {
             tx_sequence_number: self.tx_sequence_number as u64,
-            tx_checkpoint_number: self.checkpoint_sequence_number as u64,
             checkpoint_viewed_at,
         })
     }
@@ -674,7 +657,6 @@ impl Target<Cursor> for TxLookup {
     fn cursor(&self, checkpoint_viewed_at: u64) -> Cursor {
         Cursor::new(TransactionBlockCursor {
             tx_sequence_number: self.tx_sequence_number as u64,
-            tx_checkpoint_number: 0, // TODO (wlmyng)
             checkpoint_viewed_at,
         })
     }
@@ -814,18 +796,30 @@ impl TryFrom<TransactionBlockEffects> for TransactionBlock {
     }
 }
 
-fn max_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(a_val), Some(b_val)) => Some(std::cmp::max(a_val, b_val)),
-        (Some(val), None) | (None, Some(val)) => Some(val),
-        (None, None) => None,
-    }
+// fn max_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+//     match (a, b) {
+//         (Some(a_val), Some(b_val)) => Some(std::cmp::max(a_val, b_val)),
+//         (Some(val), None) | (None, Some(val)) => Some(val),
+//         (None, None) => None,
+//     }
+// }
+
+#[macro_export]
+macro_rules! max_option {
+    ($($x:expr),+ $(,)?) => {{
+        [$($x),*].iter()
+            .filter_map(|&x| x)
+            .max()
+    }};
 }
 
-fn min_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(a_val), Some(b_val)) => Some(std::cmp::min(a_val, b_val)),
-        (Some(val), None) | (None, Some(val)) => Some(val),
-        (None, None) => None,
-    }
+macro_rules! min_option {
+    ($($x:expr),+ $(,)?) => {{
+        [$($x),*].iter()
+            .filter_map(|&x| x)
+            .min()
+    }};
 }
+
+pub(crate) use max_option;
+pub(crate) use min_option;
