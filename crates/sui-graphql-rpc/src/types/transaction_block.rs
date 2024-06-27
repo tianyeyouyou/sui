@@ -375,7 +375,10 @@ impl TransactionBlock {
                             })
                             .optional()?;
 
-                        sequence_number.map(|sequence_number| sequence_number as u64)
+                        match sequence_number {
+                            Some(sequence_number) => Some(sequence_number as u64),
+                            None => return Ok::<_, diesel::result::Error>((false, false, vec![])),
+                        }
                     }
                     None => None,
                 };
@@ -389,7 +392,10 @@ impl TransactionBlock {
                             })
                             .optional()?;
 
-                        sequence_number.map(|sequence_number| sequence_number as u64)
+                        match sequence_number {
+                            Some(sequence_number) => Some(sequence_number as u64),
+                            None => return Ok::<_, diesel::result::Error>((false, false, vec![])),
+                        }
                     }
                     None => None,
                 };

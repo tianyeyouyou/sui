@@ -250,7 +250,7 @@ impl Epoch {
             return Ok(Connection::new(false, false));
         };
 
-        let within_checkpoint = self
+        let within_checkpoints = self
             .stored
             .last_checkpoint_id
             .map(|id| id as u64)
@@ -262,7 +262,7 @@ impl Epoch {
             page,
             filter,
             self.checkpoint_viewed_at,
-            Some(within_checkpoint),
+            Some(within_checkpoints),
         )
         .await
         .extend()
