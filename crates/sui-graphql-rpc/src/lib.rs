@@ -16,4 +16,5 @@ mod mutation;
 pub(crate) mod raw_query;
 pub mod server;
 pub mod test_infra;
+pub(crate) mod tx_lookups;
 mod types;
