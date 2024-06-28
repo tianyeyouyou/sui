@@ -436,15 +436,7 @@ impl Object {
         scan_limit: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>> {
         ObjectImpl(self)
-            .received_transaction_blocks(
-                ctx,
-                first,
-                after,
-                last,
-                before,
-                filter,
-                scan_limit,
-            )
+            .received_transaction_blocks(ctx, first, after, last, before, filter, scan_limit)
             .await
     }
 
@@ -1017,7 +1009,7 @@ impl ObjectFilter {
                         hex::encode(id.into_vec())
                     )
                     .unwrap();
-                    prefix = ",";
+                    prefix = ", ";
                 }
                 inner.push(')');
                 query = or_filter!(query, inner);
