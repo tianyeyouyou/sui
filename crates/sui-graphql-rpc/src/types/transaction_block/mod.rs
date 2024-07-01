@@ -35,10 +35,6 @@ use crate::{
     filter, inner_join, query,
     raw_query::RawQuery,
     server::watermark_task::Watermark,
-    tx_lookups::{
-        select_changed, select_fun, select_ids, select_input, select_kind, select_mod, select_pkg,
-        select_recipient, select_sender, select_tx, TxLookupBound,
-    },
     types::{intersect, type_filter::ModuleFilter},
 };
 
@@ -54,6 +50,13 @@ use super::{
     transaction_block_kind::TransactionBlockKind,
     type_filter::FqNameFilter,
 };
+
+use tx_lookups::{
+    select_changed, select_fun, select_ids, select_input, select_kind, select_mod, select_pkg,
+    select_recipient, select_sender, select_tx, TxLookupBound,
+};
+
+mod tx_lookups;
 
 /// Wraps the actual transaction block data with the checkpoint sequence number at which the data
 /// was viewed, for consistent results on paginating through and resolving nested types.
