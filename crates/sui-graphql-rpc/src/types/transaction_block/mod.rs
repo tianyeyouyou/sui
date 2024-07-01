@@ -11,6 +11,7 @@ use diesel::{
     ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl, Selectable, SelectableHelper,
 };
 use fastcrypto::encoding::{Base58, Encoding};
+use paginate::{tx_bounds_query, TxBounds};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use sui_indexer::{
@@ -56,6 +57,7 @@ use tx_lookups::{
     select_recipient, select_sender, select_tx, TxLookupBound,
 };
 
+mod paginate;
 mod tx_lookups;
 
 /// Wraps the actual transaction block data with the checkpoint sequence number at which the data
@@ -320,33 +322,12 @@ impl TransactionBlock {
         scan_limit: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>, Error> {
         filter.is_consistent()?;
-        // If cursors are provided, defer to the `checkpoint_viewed_at` in the cursor if they are
-        // consistent. Otherwise, use the value from the parameter, or set to None. This is so that
-        // paginated queries are consistent with the previous query that created the cursor.
         let cursor_viewed_at = page.validate_cursor_consistency()?;
         let checkpoint_viewed_at = cursor_viewed_at.unwrap_or(checkpoint_viewed_at);
 
         let db: &Db = ctx.data_unchecked();
 
-        // Anchor the lower and upper checkpoint bounds if provided from the filter, otherwise
-        // default the lower bound to 0 and the upper bound to `checkpoint_viewed_at`. Increment
-        // `after` by 1 so that we can uniformly select the `min_tx_sequence_number` for the lower
-        // bound. Similarly, decrement `before` by 1 so that we can uniformly select the
-        // `max_tx_sequence_number`. In other words, the range consists of all transactions from the
-        // smallest tx_sequence_number in lo_cp to the max tx_sequence_number in hi_cp.
-        let mut lo_cp = max_option!(
-            filter.after_checkpoint.map(|x| x.saturating_add(1)),
-            filter.at_checkpoint,
-            Some(0)
-        )
-        .unwrap(); // Safe to unwrap because of the `Some(0)` default
-
-        let mut hi_cp = min_option!(
-            filter.at_checkpoint,
-            filter.before_checkpoint.map(|x| x.saturating_sub(1)),
-            Some(checkpoint_viewed_at)
-        )
-        .unwrap();
+        let (mut lo_cp, mut hi_cp) = filter.cp_bounds(checkpoint_viewed_at);
 
         // If `scan_limit` is set, we need to adjust the lower and upper bounds. It is up to
         // the caller of `TransactionBlock::paginate` to determine whether `scan_limit` is
@@ -366,49 +347,13 @@ impl TransactionBlock {
 
         let (prev, next, transactions): (bool, bool, Vec<StoredTransaction>) = db
             .execute_repeatable(move |conn| {
-                // The min or first `tx_sequence_number` of a checkpoint is the previous
-                // checkpoint's `network_total_transactions`. Because this refers to a historical
-                // checkpoint, if we yield a `None` result, we can return early.
-                let lo_tx = match lo_cp {
-                    0 => 0,
-                    _ => {
-                        let sequence_number: Option<i64> = conn
-                            .first(move || {
-                                cp::checkpoints
-                                    .select(cp::network_total_transactions)
-                                    .filter(cp::sequence_number.eq((lo_cp - 1) as i64))
-                            })
-                            .optional()?;
-
-                        match sequence_number {
-                            Some(sequence_number) => sequence_number as u64,
-                            None => return Ok::<_, diesel::result::Error>((false, false, vec![])),
-                        }
-                    }
-                };
-
-                // The max or last `tx_sequence_number` of a checkpoint is the current checkpoint's
-                // `network_total_transactions` - 1. Since we cap the upper bound to
-                // `checkpoint_viewed_at`, we should always yield a result; thus, we can also return
-                // early if result is `None`.
-                let hi_tx = {
-                    let sequence_number: Option<i64> = conn
-                        .first(move || {
-                            cp::checkpoints
-                                .select(cp::network_total_transactions)
-                                .filter(cp::sequence_number.eq(hi_cp as i64))
-                        })
-                        .optional()?;
-
-                    match sequence_number {
-                        Some(sequence_number) => (sequence_number as u64).saturating_sub(1),
-                        None => return Ok::<_, diesel::result::Error>((false, false, vec![])),
-                    }
-                };
+                let TxBounds { lo, hi } = conn.result(move || {
+                    tx_bounds_query(lo_cp, hi_cp).into_boxed()
+                })?;
 
                 let sender = filter.sign_address;
 
-                let mut bound = TxLookupBound::from_range((Some(lo_tx), Some(hi_tx)));
+                let mut bound = TxLookupBound::from_range((Some(lo as u64), Some(hi as u64)));
 
                 // If `transaction_ids` is specified, we can use that in lieu of the range under the
                 // assumption that it will further constrain the rows we look up.
@@ -801,31 +746,3 @@ impl TryFrom<TransactionBlockEffects> for TransactionBlock {
         })
     }
 }
-
-// fn max_option(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-//     match (a, b) {
-//         (Some(a_val), Some(b_val)) => Some(std::cmp::max(a_val, b_val)),
-//         (Some(val), None) | (None, Some(val)) => Some(val),
-//         (None, None) => None,
-//     }
-// }
-
-#[macro_export]
-macro_rules! max_option {
-    ($($x:expr),+ $(,)?) => {{
-        [$($x),*].iter()
-            .filter_map(|&x| x)
-            .max()
-    }};
-}
-
-macro_rules! min_option {
-    ($($x:expr),+ $(,)?) => {{
-        [$($x),*].iter()
-            .filter_map(|&x| x)
-            .min()
-    }};
-}
-
-pub(crate) use max_option;
-pub(crate) use min_option;
