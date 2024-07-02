@@ -6,10 +6,13 @@ use async_graphql::{Object, SimpleObject};
 
 use super::TransactionBlock;
 
+/// An edge in a connection.
 #[derive(SimpleObject)]
 pub(crate) struct TransactionBlockEdge {
-    pub(crate) cursor: String,
+    /// The item at the end of the edge
     pub(crate) node: TransactionBlock,
+    /// A cursor for use in pagination
+    pub(crate) cursor: String,
 }
 
 pub(crate) struct TransactionBlockConnection {

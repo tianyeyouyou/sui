@@ -274,7 +274,10 @@ impl TransactionBlock {
         checkpoint_viewed_at: u64,
         scan_limit: Option<u64>,
     ) -> Result<TransactionBlockConnection, Error> {
-        filter.is_consistent()?;
+        if let Err(_) = filter.is_consistent() {
+            return Ok(TransactionBlockConnection::new(false, false));
+        }
+
         let cursor_viewed_at = page.validate_cursor_consistency()?;
         let checkpoint_viewed_at = cursor_viewed_at.unwrap_or(checkpoint_viewed_at);
         let db: &Db = ctx.data_unchecked();
