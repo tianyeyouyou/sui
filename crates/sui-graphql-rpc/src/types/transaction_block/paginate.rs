@@ -1,22 +1,50 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::tx_lookups::{
+    select_changed, select_fun, select_ids, select_input, select_kind, select_mod, select_pkg,
+    select_recipient, select_sender, select_tx,
+};
+use crate::{
+    data::{Conn, DbConnection},
+    inner_join, max_option, min_option, query,
+    raw_query::RawQuery,
+    types::type_filter::{FqNameFilter, ModuleFilter},
+};
 use diesel::{
     backend::Backend,
-    deserialize::{self, FromSql, Queryable, QueryableByName},
+    deserialize::{self, FromSql, QueryableByName},
     row::NamedRow,
 };
-use sui_indexer::schema::checkpoints;
 
-use crate::{
-    max_option, min_option, query, raw_query::RawQuery,
-    types::transaction_block::TransactionBlockFilter,
-};
+use super::TransactionBlockFilter;
 
-#[derive(Clone, Debug)]
+/// The `tx_sequence_number` range of the transactions to be queried.
+#[derive(Clone, Debug, Copy)]
 pub(crate) struct TxBounds {
     pub lo: i64,
     pub hi: i64,
+}
+
+impl TxBounds {
+    /// Anchor the lower and upper checkpoint bounds if provided from the filter, otherwise default
+    /// the lower bound to 0 and the upper bound to `checkpoint_viewed_at`. Increment `after` by 1
+    /// so that we can uniformly select the `min_tx_sequence_number` for the lower bound. Similarly,
+    /// decrement `before` by 1 so that we can uniformly select the `max_tx_sequence_number`. In
+    /// other words, the range consists of all transactions from the smallest tx_sequence_number in
+    /// lo_cp to the max tx_sequence_number in hi_cp.
+    pub(crate) fn query(
+        conn: &mut Conn,
+        after_cp: Option<u64>,
+        at_cp: Option<u64>,
+        before_cp: Option<u64>,
+        checkpoint_viewed_at: u64,
+    ) -> Result<Self, diesel::result::Error> {
+        let lo_cp = max_option!(after_cp.map(|x| x.saturating_add(1)), at_cp).unwrap_or(0);
+        let hi_cp = min_option!(before_cp.map(|x| x.saturating_sub(1)), at_cp)
+            .unwrap_or(checkpoint_viewed_at);
+        conn.result(move || tx_bounds_query(lo_cp, hi_cp).into_boxed())
+    }
 }
 
 /// `sql_query` raw queries require `QueryableByName`. The default implementation looks for a table
@@ -34,29 +62,6 @@ where
         let hi = NamedRow::get::<diesel::sql_types::BigInt, _>(row, "hi")?;
 
         Ok(Self { lo, hi })
-    }
-}
-
-impl TransactionBlockFilter {
-    /// Anchor the lower and upper checkpoint bounds if provided from the filter, otherwise default
-    /// the lower bound to 0 and the upper bound to `checkpoint_viewed_at`. Increment `after` by 1
-    /// so that we can uniformly select the `min_tx_sequence_number` for the lower bound. Similarly,
-    /// decrement `before` by 1 so that we can uniformly select the `max_tx_sequence_number`. In
-    /// other words, the range consists of all transactions from the smallest tx_sequence_number in
-    /// lo_cp to the max tx_sequence_number in hi_cp.
-    pub(crate) fn cp_bounds(&self, checkpoint_viewed_at: u64) -> (u64, u64) {
-        let lo_cp = max_option!(
-            self.after_checkpoint.map(|x| x.saturating_add(1)),
-            self.at_checkpoint
-        )
-        .unwrap_or(0);
-        let hi_cp = min_option!(
-            self.before_checkpoint.map(|x| x.saturating_sub(1)),
-            self.at_checkpoint
-        )
-        .unwrap_or(checkpoint_viewed_at);
-
-        (lo_cp, hi_cp)
     }
 }
 
@@ -109,56 +114,61 @@ macro_rules! min_option {
     }};
 }
 
-/**
- * determine the cp lower and upper bound, construct cte to fetch corresponding tx_sequence_number
- * need to reconcile this with the `after` and `before` cursors
- * and also the `scan_limit` on `tx_sequence_number`
- *
- * What are all possibilities?
- * lo_cp
- * hi_cp
- * before
- * after
- * scan_limit
- *
- * _cp and before/after can be applied together
- * how does scan_limit interact with the above?
- * can we just tack it on further?
- */
-pub struct Paginate {
-    pub(crate) after: Option<u64>,
-    pub(crate) before: Option<u64>,
-    pub(crate) scan_limit: Option<u64>,
-}
+/// Constructs a `RawQuery` as a join over all relevant side tables, filtered on their own filter
+/// condition, plus optionally a sender, plus optionally tx/cp bounds.
+pub(crate) fn subqueries(filter: &TransactionBlockFilter, tx_bounds: TxBounds) -> Option<RawQuery> {
+    let sender = filter.sign_address;
 
-/// Determines the lower checkpoint bound for a transaction block query. Increment `after` by 1 so
-/// that we can uniformly select the `min_tx_sequence_number` for the lower bound. Assumes that
-/// `after_cp` is less than `at_cp`; thus if both are provided, we only consider `at_cp`.
-pub(crate) fn cp_bounds(
-    after_cp: Option<u64>,
-    at_cp: Option<u64>,
-    before_cp: Option<u64>,
-    after_cursor: Option<u64>,
-) -> Option<u64> {
-    let mut selects = Vec::new();
+    let mut subqueries = vec![];
 
-    if let Some(at_cp) = at_cp {
-        selects.push(format!(
-            "SELECT network_total_transactions FROM checkpoints WHERE sequence_number = {}",
-            at_cp.saturating_sub(1)
+    if let Some(f) = &filter.function {
+        subqueries.push(match f {
+            FqNameFilter::ByModule(filter) => match filter {
+                ModuleFilter::ByPackage(p) => (select_pkg(p, sender, tx_bounds), "tx_calls_pkg"),
+                ModuleFilter::ByModule(p, m) => {
+                    (select_mod(p, m.clone(), sender, tx_bounds), "tx_calls_mod")
+                }
+            },
+            FqNameFilter::ByFqName(p, m, n) => (
+                select_fun(p, m.clone(), n.clone(), sender, tx_bounds),
+                "tx_calls_fun",
+            ),
+        });
+    }
+    if let Some(kind) = &filter.kind {
+        subqueries.push((select_kind(*kind, tx_bounds), "tx_kinds"));
+    }
+    if let Some(recv) = &filter.recv_address {
+        subqueries.push((select_recipient(recv, sender, tx_bounds), "tx_recipients"));
+    }
+    if let Some(input) = &filter.input_object {
+        subqueries.push((select_input(input, sender, tx_bounds), "tx_input_objects"));
+    }
+    if let Some(changed) = &filter.changed_object {
+        subqueries.push((
+            select_changed(changed, sender, tx_bounds),
+            "tx_changed_objects",
         ));
-    } else {
-        if let Some(after_cp) = after_cp {
-            selects.push(format!(
-                "SELECT network_total_transactions FROM checkpoints WHERE sequence_number = {}",
-                after_cp
-            ));
+    }
+    if let Some(sender) = &sender {
+        if !filter.has_complex_filters() || filter.kind.is_some() {
+            subqueries.push((select_sender(sender, tx_bounds), "tx_senders"));
         }
     }
-    // SELECT GREATEST(after_cursor, (select network_total_transactions from checkpoint where cp = after_cp) + 1, (select network_total_transactions from checkpoint where cp = before_cp) - scan_limit)
-    // lower bound is the greatest among
-    // after_cursor
-    // network_total_transactions from after_cp
-    // network_total_transactions from before_cp - scan_limit
-    max_option!(after_cp.map(|x| x.saturating_add(1)), at_cp)
+
+    if subqueries.is_empty() {
+        return None;
+    }
+
+    let mut subquery = subqueries.pop().unwrap().0;
+
+    if !subqueries.is_empty() {
+        subquery = query!("SELECT tx_sequence_number FROM ({}) AS initial", subquery);
+        while let Some((subselect, alias)) = subqueries.pop() {
+            subquery =
+                inner_join!(subquery, rhs => (subselect, alias), using: ["tx_sequence_number"]);
+        }
+    }
+
+    Some(subquery)
 }

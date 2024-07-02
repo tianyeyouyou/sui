@@ -8,60 +8,28 @@ use crate::types::transaction_block::TransactionBlockKindInput;
 use crate::{filter, query};
 use std::fmt::{self, Write};
 
-pub(crate) enum TxLookupBound {
-    Range((Option<u64>, Option<u64>)),
-    Set(Vec<u64>),
-}
+use super::paginate::TxBounds;
 
-impl TxLookupBound {
-    pub(crate) fn from_range(range: (Option<u64>, Option<u64>)) -> Self {
-        TxLookupBound::Range(range)
-    }
-
-    pub(crate) fn from_set(ids: Vec<u64>) -> Self {
-        TxLookupBound::Set(ids)
-    }
-}
-
-pub(crate) fn select_tx(sender: Option<SuiAddress>, bound: &TxLookupBound, from: &str) -> RawQuery {
+pub(crate) fn select_tx(sender: Option<SuiAddress>, bound: TxBounds, from: &str) -> RawQuery {
     let mut query = query!(format!("SELECT tx_sequence_number FROM {}", from));
 
     if let Some(sender) = sender {
-        query = filter!(
-            query,
-            format!("sender = '\\x{}'::bytea", hex::encode(sender.into_vec()))
-        );
+        query = filter!(query, format!("sender = {}", bytea_literal(&sender)));
     }
 
-    match bound {
-        TxLookupBound::Range((lo, hi)) => {
-            if let Some(lo) = lo {
-                query = filter!(query, format!("tx_sequence_number >= {}", lo));
-            }
-
-            if let Some(hi) = hi {
-                query = filter!(query, format!("tx_sequence_number <= {}", hi));
-            }
-        }
-        TxLookupBound::Set(ids) => {
-            let mut inner = String::new();
-            let mut prefix = "tx_sequence_number IN (";
-            for id in ids {
-                write!(&mut inner, "{prefix}{}", id).unwrap();
-                prefix = ", ";
-            }
-            inner.push(')');
-            query = filter!(query, inner);
-        }
-    }
-
-    query
+    filter!(
+        query,
+        format!(
+            "tx_sequence_number >= {} AND tx_sequence_number <= {}",
+            bound.lo, bound.hi
+        )
+    )
 }
 
 pub(crate) fn select_pkg(
     pkg: &SuiAddress,
     sender: Option<SuiAddress>,
-    bound: &TxLookupBound,
+    bound: TxBounds,
 ) -> RawQuery {
     filter!(
         select_tx(sender, bound, "tx_calls_pkg"),
@@ -73,7 +41,7 @@ pub(crate) fn select_mod(
     pkg: &SuiAddress,
     mod_: String,
     sender: Option<SuiAddress>,
-    bound: &TxLookupBound,
+    bound: TxBounds,
 ) -> RawQuery {
     filter!(
         select_tx(sender, bound, "tx_calls_mod"),
@@ -87,7 +55,7 @@ pub(crate) fn select_fun(
     mod_: String,
     fun: String,
     sender: Option<SuiAddress>,
-    bound: &TxLookupBound,
+    bound: TxBounds,
 ) -> RawQuery {
     filter!(
         select_tx(sender, bound, "tx_calls_fun"),
@@ -100,21 +68,21 @@ pub(crate) fn select_fun(
     )
 }
 
-pub(crate) fn select_kind(kind: TransactionBlockKindInput, bound: &TxLookupBound) -> RawQuery {
+pub(crate) fn select_kind(kind: TransactionBlockKindInput, bound: TxBounds) -> RawQuery {
     filter!(
         select_tx(None, bound, "tx_kinds"),
         format!("tx_kind = {}", kind as i16)
     )
 }
 
-pub(crate) fn select_sender(sender: &SuiAddress, bound: &TxLookupBound) -> RawQuery {
+pub(crate) fn select_sender(sender: &SuiAddress, bound: TxBounds) -> RawQuery {
     select_tx(Some(*sender), bound, "tx_senders")
 }
 
 pub(crate) fn select_recipient(
     recv: &SuiAddress,
     sender: Option<SuiAddress>,
-    bound: &TxLookupBound,
+    bound: TxBounds,
 ) -> RawQuery {
     filter!(
         select_tx(sender, bound, "tx_recipients"),
@@ -125,7 +93,7 @@ pub(crate) fn select_recipient(
 pub(crate) fn select_input(
     input: &SuiAddress,
     sender: Option<SuiAddress>,
-    bound: &TxLookupBound,
+    bound: TxBounds,
 ) -> RawQuery {
     filter!(
         select_tx(sender, bound, "tx_input_objects"),
@@ -136,7 +104,7 @@ pub(crate) fn select_input(
 pub(crate) fn select_changed(
     changed: &SuiAddress,
     sender: Option<SuiAddress>,
-    bound: &TxLookupBound,
+    bound: TxBounds,
 ) -> RawQuery {
     filter!(
         select_tx(sender, bound, "tx_changed_objects"),
@@ -147,7 +115,7 @@ pub(crate) fn select_changed(
     )
 }
 
-pub(crate) fn select_ids(ids: &Vec<Digest>, bound: &TxLookupBound) -> RawQuery {
+pub(crate) fn select_ids(ids: &Vec<Digest>, bound: TxBounds) -> RawQuery {
     let query = select_tx(None, bound, "tx_digests");
     if ids.is_empty() {
         filter!(query, "1=0")
