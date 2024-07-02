@@ -6,14 +6,10 @@ use async_graphql::{
     dataloader::Loader,
     *,
 };
-use diesel::{
-    deserialize::{Queryable, QueryableByName},
-    ExpressionMethods, JoinOnDsl, QueryDsl, Selectable, SelectableHelper,
-};
+use diesel::{ExpressionMethods, JoinOnDsl, QueryDsl, SelectableHelper};
 use fastcrypto::encoding::{Base58, Encoding};
-use paginate::{subqueries, TxBounds};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+pub(crate) use filter::TransactionBlockFilter;
+use std::collections::{BTreeMap, HashMap};
 use sui_indexer::{
     models::transactions::StoredTransaction,
     schema::{transactions, tx_digests},
@@ -28,33 +24,33 @@ use sui_types::{
         TransactionDataAPI, TransactionExpiration,
     },
 };
+pub(crate) use tx_cursor::Cursor;
+use tx_cursor::TxLookup;
+use tx_lookups::{subqueries, TxBounds};
 
 use crate::{
-    consistency::Checkpointed,
     data::{self, DataLoader, Db, DbConnection, QueryExecutor},
     error::Error,
     filter, query,
-    raw_query::RawQuery,
     server::watermark_task::Watermark,
-    types::intersect,
 };
 
 use super::{
     address::Address,
     base64::Base64,
-    cursor::{self, Page, Paginated, RawPaginated, Target},
+    cursor::{Page, Target},
     digest::Digest,
     epoch::Epoch,
     gas::GasInput,
     sui_address::SuiAddress,
     transaction_block_effects::{TransactionBlockEffects, TransactionBlockEffectsKind},
     transaction_block_kind::TransactionBlockKind,
-    type_filter::FqNameFilter,
 };
 
 use tx_lookups::select_ids;
 
-mod paginate;
+mod filter;
+mod tx_cursor;
 mod tx_lookups;
 
 /// Wraps the actual transaction block data with the checkpoint sequence number at which the data
@@ -100,39 +96,7 @@ pub(crate) enum TransactionBlockKindInput {
     ProgrammableTx = 1,
 }
 
-#[derive(InputObject, Debug, Default, Clone)]
-pub(crate) struct TransactionBlockFilter {
-    pub function: Option<FqNameFilter>,
-
-    /// An input filter selecting for either system or programmable transactions.
-    pub kind: Option<TransactionBlockKindInput>,
-    pub after_checkpoint: Option<u64>,
-    pub at_checkpoint: Option<u64>,
-    pub before_checkpoint: Option<u64>,
-
-    pub sign_address: Option<SuiAddress>,
-    pub recv_address: Option<SuiAddress>,
-
-    pub input_object: Option<SuiAddress>,
-    pub changed_object: Option<SuiAddress>,
-
-    pub transaction_ids: Option<Vec<Digest>>,
-}
-
-pub(crate) type Cursor = cursor::JsonCursor<TransactionBlockCursor>;
 type Query<ST, GB> = data::Query<ST, transactions::table, GB>;
-
-/// The cursor returned for each `TransactionBlock` in a connection's page of results. The
-/// `checkpoint_viewed_at` will set the consistent upper bound for subsequent queries made on this
-/// cursor.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub(crate) struct TransactionBlockCursor {
-    /// The checkpoint sequence number this was viewed at.
-    #[serde(rename = "c")]
-    pub checkpoint_viewed_at: u64,
-    #[serde(rename = "t")]
-    pub tx_sequence_number: u64,
-}
 
 /// DataLoader key for fetching a `TransactionBlock` by its digest, optionally constrained by a
 /// consistency cursor.
@@ -140,12 +104,6 @@ pub(crate) struct TransactionBlockCursor {
 struct DigestKey {
     pub digest: Digest,
     pub checkpoint_viewed_at: u64,
-}
-
-#[derive(Clone, Debug, Queryable, QueryableByName, Selectable)]
-#[diesel(table_name = transactions)]
-pub struct TxLookup {
-    pub tx_sequence_number: i64,
 }
 
 #[Object]
@@ -321,7 +279,6 @@ impl TransactionBlock {
         filter.is_consistent()?;
         let cursor_viewed_at = page.validate_cursor_consistency()?;
         let checkpoint_viewed_at = cursor_viewed_at.unwrap_or(checkpoint_viewed_at);
-
         let db: &Db = ctx.data_unchecked();
 
         use transactions::dsl as tx;
@@ -434,209 +391,6 @@ impl TransactionBlock {
         }
 
         Ok(conn)
-    }
-}
-
-impl TransactionBlockFilter {
-    /// Try to create a filter whose results are the intersection of transaction blocks in `self`'s
-    /// results and transaction blocks in `other`'s results. This may not be possible if the
-    /// resulting filter is inconsistent in some way (e.g. a filter that requires one field to be
-    /// two different values simultaneously).
-    pub(crate) fn intersect(self, other: Self) -> Option<Self> {
-        macro_rules! intersect {
-            ($field:ident, $body:expr) => {
-                intersect::field(self.$field, other.$field, $body)
-            };
-        }
-
-        Some(Self {
-            function: intersect!(function, FqNameFilter::intersect)?,
-            kind: intersect!(kind, intersect::by_eq)?,
-
-            after_checkpoint: intersect!(after_checkpoint, intersect::by_max)?,
-            at_checkpoint: intersect!(at_checkpoint, intersect::by_eq)?,
-            before_checkpoint: intersect!(before_checkpoint, intersect::by_min)?,
-
-            sign_address: intersect!(sign_address, intersect::by_eq)?,
-            recv_address: intersect!(recv_address, intersect::by_eq)?,
-            input_object: intersect!(input_object, intersect::by_eq)?,
-            changed_object: intersect!(changed_object, intersect::by_eq)?,
-
-            transaction_ids: intersect!(transaction_ids, |a, b| {
-                let a = BTreeSet::from_iter(a.into_iter());
-                let b = BTreeSet::from_iter(b.into_iter());
-                Some(a.intersection(&b).cloned().collect())
-            })?,
-        })
-    }
-
-    /// A TransactionBlockFilter has complex filters if it has at least one of `function`, `kind`,
-    /// `recv_address`, `input_object`, and `changed_object`.
-    pub(crate) fn has_complex_filters(&self) -> bool {
-        [
-            self.function.is_some(),
-            self.kind.is_some(),
-            self.recv_address.is_some(),
-            self.input_object.is_some(),
-            self.changed_object.is_some(),
-        ]
-        .iter()
-        .filter(|&is_set| *is_set)
-        .count()
-            > 0
-    }
-
-    /// A TransactionBlockFilter is considered not to have any filters if no filters are specified,
-    /// or if the only filters are on `checkpoint`.
-    pub(crate) fn has_filters(&self) -> bool {
-        self.function.is_some()
-            || self.kind.is_some()
-            || self.sign_address.is_some()
-            || self.recv_address.is_some()
-            || self.input_object.is_some()
-            || self.changed_object.is_some()
-            || self.transaction_ids.is_some()
-    }
-
-    pub(crate) fn is_consistent(&self) -> Result<(), Error> {
-        if let Some(before) = self.before_checkpoint {
-            if before == 0 {
-                return Err(Error::Client(
-                    "`beforeCheckpoint` must be greater than 0".to_string(),
-                ));
-            }
-        }
-
-        if let (Some(after), Some(before)) = (self.after_checkpoint, self.before_checkpoint) {
-            // Because `after` and `before` are both exclusive, they must be at least one apart if
-            // both are provided.
-            if after + 1 >= before {
-                return Err(Error::Client(
-                    "`afterCheckpoint` must be less than `beforeCheckpoint`".to_string(),
-                ));
-            }
-        }
-
-        if let (Some(after), Some(at)) = (self.after_checkpoint, self.at_checkpoint) {
-            if after >= at {
-                return Err(Error::Client(
-                    "`afterCheckpoint` must be less than `atCheckpoint`".to_string(),
-                ));
-            }
-        }
-
-        if let (Some(at), Some(before)) = (self.at_checkpoint, self.before_checkpoint) {
-            if at >= before {
-                return Err(Error::Client(
-                    "`atCheckpoint` must be less than `beforeCheckpoint`".to_string(),
-                ));
-            }
-        }
-
-        if let (Some(TransactionBlockKindInput::SystemTx), Some(signer)) =
-            (self.kind, self.sign_address)
-        {
-            if signer != SuiAddress::from(NativeSuiAddress::ZERO) {
-                return Err(Error::Client(
-                    "System transactions cannot have a sender".to_string(),
-                ));
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Paginated<Cursor> for StoredTransaction {
-    type Source = transactions::table;
-
-    fn filter_ge<ST, GB>(cursor: &Cursor, query: Query<ST, GB>) -> Query<ST, GB> {
-        query.filter(transactions::dsl::tx_sequence_number.ge(cursor.tx_sequence_number as i64))
-    }
-
-    fn filter_le<ST, GB>(cursor: &Cursor, query: Query<ST, GB>) -> Query<ST, GB> {
-        query.filter(transactions::dsl::tx_sequence_number.le(cursor.tx_sequence_number as i64))
-    }
-
-    fn order<ST, GB>(asc: bool, query: Query<ST, GB>) -> Query<ST, GB> {
-        use transactions::dsl;
-        if asc {
-            query.order_by(dsl::tx_sequence_number.asc())
-        } else {
-            query.order_by(dsl::tx_sequence_number.desc())
-        }
-    }
-}
-
-impl Target<Cursor> for StoredTransaction {
-    fn cursor(&self, checkpoint_viewed_at: u64) -> Cursor {
-        Cursor::new(TransactionBlockCursor {
-            tx_sequence_number: self.tx_sequence_number as u64,
-            checkpoint_viewed_at,
-        })
-    }
-}
-
-impl Checkpointed for Cursor {
-    fn checkpoint_viewed_at(&self) -> u64 {
-        self.checkpoint_viewed_at
-    }
-}
-
-impl Target<Cursor> for TxLookup {
-    fn cursor(&self, checkpoint_viewed_at: u64) -> Cursor {
-        Cursor::new(TransactionBlockCursor {
-            tx_sequence_number: self.tx_sequence_number as u64,
-            checkpoint_viewed_at,
-        })
-    }
-}
-
-impl RawPaginated<Cursor> for TxLookup {
-    fn filter_ge(cursor: &Cursor, query: RawQuery) -> RawQuery {
-        filter!(
-            query,
-            format!("tx_sequence_number >= {}", cursor.tx_sequence_number)
-        )
-    }
-
-    fn filter_le(cursor: &Cursor, query: RawQuery) -> RawQuery {
-        filter!(
-            query,
-            format!("tx_sequence_number <= {}", cursor.tx_sequence_number)
-        )
-    }
-
-    fn order(asc: bool, query: RawQuery) -> RawQuery {
-        if asc {
-            query.order_by("tx_sequence_number ASC")
-        } else {
-            query.order_by("tx_sequence_number DESC")
-        }
-    }
-}
-
-impl RawPaginated<Cursor> for StoredTransaction {
-    fn filter_ge(cursor: &Cursor, query: RawQuery) -> RawQuery {
-        filter!(
-            query,
-            format!("tx_sequence_number >= {}", cursor.tx_sequence_number)
-        )
-    }
-
-    fn filter_le(cursor: &Cursor, query: RawQuery) -> RawQuery {
-        filter!(
-            query,
-            format!("tx_sequence_number <= {}", cursor.tx_sequence_number)
-        )
-    }
-
-    fn order(asc: bool, query: RawQuery) -> RawQuery {
-        if asc {
-            query.order_by("tx_sequence_number ASC")
-        } else {
-            query.order_by("tx_sequence_number DESC")
-        }
     }
 }
 
