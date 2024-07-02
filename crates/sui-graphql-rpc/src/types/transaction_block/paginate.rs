@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::tx_lookups::{
-    select_changed, select_fun, select_ids, select_input, select_kind, select_mod, select_pkg,
-    select_recipient, select_sender, select_tx,
+    select_changed, select_fun, select_input, select_kind, select_mod, select_pkg,
+    select_recipient, select_sender,
 };
 use crate::{
     data::{Conn, DbConnection},

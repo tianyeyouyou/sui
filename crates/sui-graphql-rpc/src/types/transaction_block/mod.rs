@@ -33,7 +33,7 @@ use crate::{
     consistency::Checkpointed,
     data::{self, DataLoader, Db, DbConnection, QueryExecutor},
     error::Error,
-    filter,
+    filter, query,
     raw_query::RawQuery,
     server::watermark_task::Watermark,
     types::intersect,
@@ -360,7 +360,6 @@ impl TransactionBlock {
                     return Ok::<_, diesel::result::Error>((prev, next, iter.collect()));
                 };
 
-                let digest_txs: Option<Vec<u64>>;
                 let subquery = subqueries(&filter, tx_bounds);
 
                 if let Some(txs) = &filter.transaction_ids {
@@ -370,12 +369,29 @@ impl TransactionBlock {
                     if transaction_ids.is_empty() {
                         return Ok::<_, diesel::result::Error>((false, false, vec![]));
                     }
-                    digest_txs = Some(
-                        transaction_ids
-                            .into_iter()
-                            .map(|x| x.tx_sequence_number as u64)
-                            .collect(),
-                    );
+                    let digest_txs = transaction_ids
+                        .into_iter()
+                        .map(|x| (x.tx_sequence_number as u64).to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ");
+
+                    if let Some(subquery) = subquery {
+                        let (prev, next, iter) = page.paginate_raw_query::<StoredTransaction>(
+                            conn,
+                            checkpoint_viewed_at,
+                            query!(
+                                "{} AND tx_sequence_number IN ({})",
+                                filter!(
+                                    query!("SELECT * FROM TRANSACTIONS"),
+                                    format!("tx_sequence_number IN ({})", digest_txs)
+                                ),
+                                subquery
+                            ),
+                        )?;
+
+                        let transactions = iter.collect();
+                        return Ok::<_, diesel::result::Error>((prev, next, transactions));
+                    }
                 } else {
                     // If `transactionIds` were not specified, then there must be at least one
                     // subquery, and thus it should be safe to unwrap. Issue the query to fetch the
@@ -577,6 +593,30 @@ impl Target<Cursor> for TxLookup {
 }
 
 impl RawPaginated<Cursor> for TxLookup {
+    fn filter_ge(cursor: &Cursor, query: RawQuery) -> RawQuery {
+        filter!(
+            query,
+            format!("tx_sequence_number >= {}", cursor.tx_sequence_number)
+        )
+    }
+
+    fn filter_le(cursor: &Cursor, query: RawQuery) -> RawQuery {
+        filter!(
+            query,
+            format!("tx_sequence_number <= {}", cursor.tx_sequence_number)
+        )
+    }
+
+    fn order(asc: bool, query: RawQuery) -> RawQuery {
+        if asc {
+            query.order_by("tx_sequence_number ASC")
+        } else {
+            query.order_by("tx_sequence_number DESC")
+        }
+    }
+}
+
+impl RawPaginated<Cursor> for StoredTransaction {
     fn filter_ge(cursor: &Cursor, query: RawQuery) -> RawQuery {
         filter!(
             query,
