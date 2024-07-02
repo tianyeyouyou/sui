@@ -22,10 +22,18 @@ pub(crate) struct TransactionBlockConnection {
 
 #[Object]
 impl TransactionBlockConnection {
-    async fn edges(&self) -> &[TransactionBlockEdge] {
-        &self.edges
-    }
-
+    /// Information to aid in pagination.
+    ///
+    /// When `scanLimit` is specified on `TransactionBlock` queries:
+    /// - Even if the current page is empty, `hasNextPage` and `hasPreviousPage` will be true until
+    ///   the caller paginates to the end of either range.
+    ///
+    /// When `scanLimit` is not specified, then:
+    /// - `hasNextPage` and `hasPreviousPage` behave conventionally, returning false
+    ///   when there are no more results in the respective direction.
+    ///
+    /// This approach ensures consistent pagination behavior, allowing traversal through potentially
+    /// sparse data sets within the specified or default range.
     async fn page_info(&self) -> PageInfo {
         let start_cursor = self
             .start_cursor
@@ -43,6 +51,15 @@ impl TransactionBlockConnection {
             start_cursor,
             end_cursor,
         }
+    }
+
+    async fn edges(&self) -> &[TransactionBlockEdge] {
+        &self.edges
+    }
+
+    /// A list of nodes.
+    async fn nodes(&self) -> Vec<&TransactionBlock> {
+        self.edges.iter().map(|e| &e.node).collect()
     }
 }
 
