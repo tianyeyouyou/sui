@@ -291,16 +291,15 @@ impl TransactionBlock {
                     filter.at_checkpoint,
                     filter.before_checkpoint,
                     checkpoint_viewed_at,
+                    scan_limit,
+                    page.is_from_front(),
                 )?;
-                // TODO (wlmyng): adjust per cursor
-                // TODO (wlmyng): handle scan_limit and its interaction with has_next_page and has_prev_page
-                // if let Some(scan_limit) = scan_limit {
-                // if page.is_from_front() {
-                // hi_tx = std::cmp::min(hi_tx, lo_tx.saturating_add(scan_limit));
-                // } else {
-                // lo_tx = std::cmp::max(lo_tx, hi_tx.saturating_sub(scan_limit));
-                // }
-                // }
+
+                let has_prev_page = Some(tx_bounds.has_prev_page());
+                let has_next_page = Some(tx_bounds.has_next_page());
+
+                println!("filter: {:?}", filter);
+                println!("tx_bounds: {:?}", tx_bounds);
 
                 if !filter.has_filters() {
                     let (prev, next, iter) = page.paginate_query::<StoredTransaction, _, _, _>(
@@ -308,13 +307,17 @@ impl TransactionBlock {
                         checkpoint_viewed_at,
                         move || {
                             tx::transactions
-                                .filter(tx::tx_sequence_number.ge(tx_bounds.lo))
-                                .filter(tx::tx_sequence_number.le(tx_bounds.hi))
+                                .filter(tx::tx_sequence_number.ge(tx_bounds.lo() as i64))
+                                .filter(tx::tx_sequence_number.le(tx_bounds.hi() as i64))
                                 .into_boxed()
                         },
                     )?;
 
-                    return Ok::<_, diesel::result::Error>((prev, next, iter.collect()));
+                    return Ok::<_, diesel::result::Error>((
+                        has_prev_page.unwrap_or(prev),
+                        has_next_page.unwrap_or(next),
+                        iter.collect(),
+                    ));
                 };
 
                 let subquery = subqueries(&filter, tx_bounds);
@@ -347,34 +350,40 @@ impl TransactionBlock {
                         )?;
 
                         let transactions = iter.collect();
-                        return Ok::<_, diesel::result::Error>((prev, next, transactions));
+                        return Ok::<_, diesel::result::Error>((
+                            has_prev_page.unwrap_or(prev),
+                            has_next_page.unwrap_or(next),
+                            transactions,
+                        ));
                     }
-                } else {
-                    // If `transactionIds` were not specified, then there must be at least one
-                    // subquery, and thus it should be safe to unwrap. Issue the query to fetch the
-                    // set of `tx_sequence_number` that will then be used to fetch remaining
-                    // contents from the `transactions` table.
-                    let (prev, next, results) = page.paginate_raw_query::<TxLookup>(
-                        conn,
-                        checkpoint_viewed_at,
-                        subquery.unwrap(),
-                    )?;
-
-                    let tx_sequence_numbers = results
-                        .into_iter()
-                        .map(|x| x.tx_sequence_number)
-                        .collect::<Vec<i64>>();
-
-                    // then just do a multi-get
-                    let transactions = conn.results(move || {
-                        tx::transactions
-                            .filter(tx::tx_sequence_number.eq_any(tx_sequence_numbers.clone()))
-                    })?;
-
-                    return Ok::<_, diesel::result::Error>((prev, next, transactions));
                 }
 
-                Ok::<_, diesel::result::Error>((false, false, vec![]))
+                // If `transactionIds` were not specified, then there must be at least one
+                // subquery, and thus it should be safe to unwrap. Issue the query to fetch the
+                // set of `tx_sequence_number` that will then be used to fetch remaining
+                // contents from the `transactions` table.
+                let (prev, next, results) = page.paginate_raw_query::<TxLookup>(
+                    conn,
+                    checkpoint_viewed_at,
+                    subquery.unwrap(),
+                )?;
+
+                let tx_sequence_numbers = results
+                    .into_iter()
+                    .map(|x| x.tx_sequence_number)
+                    .collect::<Vec<i64>>();
+
+                // then just do a multi-get
+                let transactions = conn.results(move || {
+                    tx::transactions
+                        .filter(tx::tx_sequence_number.eq_any(tx_sequence_numbers.clone()))
+                })?;
+
+                return Ok::<_, diesel::result::Error>((
+                    has_prev_page.unwrap_or(prev),
+                    has_next_page.unwrap_or(next),
+                    transactions,
+                ));
             })
             .await?;
 
