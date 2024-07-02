@@ -14,3 +14,4 @@ ROOT="$SCRIPT_DIR/.."
 cd "$ROOT/crates/sui-protocol-config" && cargo insta test --review
 cd "$ROOT/crates/sui-swarm-config" && cargo insta test --review
 cd "$ROOT/crates/sui-open-rpc" && cargo run --example generate-json-rpc-spec -- record
+cd "$ROOT" && cargo -q run --example generate-format -- print > crates/sui-core/tests/staged/sui.yaml
