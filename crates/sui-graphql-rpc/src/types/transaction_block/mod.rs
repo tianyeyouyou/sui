@@ -1,11 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use async_graphql::{
-    connection::{Connection, CursorType, Edge},
-    dataloader::Loader,
-    *,
-};
+use async_graphql::{connection::CursorType, dataloader::Loader, *};
 use diesel::{ExpressionMethods, JoinOnDsl, QueryDsl, SelectableHelper};
 use fastcrypto::encoding::{Base58, Encoding};
 pub(crate) use filter::TransactionBlockFilter;
@@ -24,6 +20,7 @@ use sui_types::{
         TransactionDataAPI, TransactionExpiration,
     },
 };
+pub(crate) use tx_connection::{TransactionBlockConnection, TransactionBlockEdge};
 pub(crate) use tx_cursor::Cursor;
 use tx_cursor::TxLookup;
 use tx_lookups::{subqueries, TxBounds};
@@ -50,6 +47,7 @@ use super::{
 use tx_lookups::select_ids;
 
 mod filter;
+mod tx_connection;
 mod tx_cursor;
 mod tx_lookups;
 
@@ -275,7 +273,7 @@ impl TransactionBlock {
         filter: TransactionBlockFilter,
         checkpoint_viewed_at: u64,
         scan_limit: Option<u64>,
-    ) -> Result<Connection<String, TransactionBlock>, Error> {
+    ) -> Result<TransactionBlockConnection, Error> {
         filter.is_consistent()?;
         let cursor_viewed_at = page.validate_cursor_consistency()?;
         let checkpoint_viewed_at = cursor_viewed_at.unwrap_or(checkpoint_viewed_at);
@@ -283,8 +281,8 @@ impl TransactionBlock {
 
         use transactions::dsl as tx;
 
-        let (prev, next, transactions): (bool, bool, Vec<StoredTransaction>) = db
-            .execute_repeatable(move |conn| {
+        let (prev, next, transactions, tx_bounds): (bool, bool, Vec<StoredTransaction>, TxBounds) =
+            db.execute_repeatable(move |conn| {
                 let tx_bounds = TxBounds::query(
                     conn,
                     filter.after_checkpoint,
@@ -295,13 +293,19 @@ impl TransactionBlock {
                     page.is_from_front(),
                 )?;
 
-                let has_prev_page = Some(tx_bounds.has_prev_page());
-                let has_next_page = Some(tx_bounds.has_next_page());
-
                 println!("filter: {:?}", filter);
                 println!("tx_bounds: {:?}", tx_bounds);
 
-                if !filter.has_filters() {
+                // There are three potential types of queries we may construct. If no filters are
+                // selected, or if the filter is composed of only checkpoint filters, we can
+                // directly query the main `transactions` table. If `transactionIds` is specified,
+                // the query against `transactions` will apply two filters on `tx_sequence_number`,
+                // one where `tx_sequence_number` is in the list of digests, and where
+                // `tx_sequence_number` is in a subselect consisting of joins across the lookup
+                // tables. Finally, if other filters are specified, we first fetch the set of
+                // `tx_sequence_number` from a join over relevant lookup tables, and then issue a
+                // query against the `transactions` table to fetch the remaining contents.
+                let (prev, next, transactions) = if !filter.has_filters() {
                     let (prev, next, iter) = page.paginate_query::<StoredTransaction, _, _, _>(
                         conn,
                         checkpoint_viewed_at,
@@ -313,81 +317,69 @@ impl TransactionBlock {
                         },
                     )?;
 
-                    return Ok::<_, diesel::result::Error>((
-                        has_prev_page.unwrap_or(prev),
-                        has_next_page.unwrap_or(next),
-                        iter.collect(),
-                    ));
-                };
-
-                let subquery = subqueries(&filter, tx_bounds);
-
-                if let Some(txs) = &filter.transaction_ids {
+                    (prev, next, iter.collect())
+                } else if let Some(txs) = &filter.transaction_ids {
                     let transaction_ids: Vec<TxLookup> =
                         conn.results(move || select_ids(txs, tx_bounds).into_boxed())?;
-                    // TODO (wlmyng) we can adjust has_prev_page and has_next_page based on scan_limit
-                    if transaction_ids.is_empty() {
-                        return Ok::<_, diesel::result::Error>((false, false, vec![]));
+
+                    let mut query = if transaction_ids.is_empty() {
+                        query!("SELECT * FROM TRANSACTIONS WHERE 1 = 0")
+                    } else {
+                        let digest_txs = transaction_ids
+                            .into_iter()
+                            .map(|x| (x.tx_sequence_number as u64).to_string())
+                            .collect::<Vec<String>>()
+                            .join(", ");
+
+                        filter!(
+                            query!("SELECT * FROM TRANSACTIONS"),
+                            format!("tx_sequence_number IN ({})", digest_txs)
+                        )
+                    };
+
+                    if let Some(subquery) = subqueries(&filter, tx_bounds) {
+                        query = query!("{} AND tx_sequence_number IN ({})", query, subquery);
                     }
-                    let digest_txs = transaction_ids
+
+                    let (prev, next, iter) = page.paginate_raw_query::<StoredTransaction>(
+                        conn,
+                        checkpoint_viewed_at,
+                        query,
+                    )?;
+
+                    (prev, next, iter.collect())
+                } else {
+                    // If `transactionIds` were not specified, then there must be at least one
+                    // subquery, and thus it should be safe to unwrap. Issue the query to fetch the
+                    // set of `tx_sequence_number` that will then be used to fetch remaining
+                    // contents from the `transactions` table.
+                    let subquery = subqueries(&filter, tx_bounds).unwrap();
+                    let (prev, next, results) =
+                        page.paginate_raw_query::<TxLookup>(conn, checkpoint_viewed_at, subquery)?;
+
+                    let tx_sequence_numbers = results
                         .into_iter()
-                        .map(|x| (x.tx_sequence_number as u64).to_string())
-                        .collect::<Vec<String>>()
-                        .join(", ");
+                        .map(|x| x.tx_sequence_number)
+                        .collect::<Vec<i64>>();
 
-                    if let Some(subquery) = subquery {
-                        let (prev, next, iter) = page.paginate_raw_query::<StoredTransaction>(
-                            conn,
-                            checkpoint_viewed_at,
-                            query!(
-                                "{} AND tx_sequence_number IN ({})",
-                                filter!(
-                                    query!("SELECT * FROM TRANSACTIONS"),
-                                    format!("tx_sequence_number IN ({})", digest_txs)
-                                ),
-                                subquery
-                            ),
-                        )?;
+                    // then just do a multi-get
+                    let transactions = conn.results(move || {
+                        tx::transactions
+                            .filter(tx::tx_sequence_number.eq_any(tx_sequence_numbers.clone()))
+                    })?;
 
-                        let transactions = iter.collect();
-                        return Ok::<_, diesel::result::Error>((
-                            has_prev_page.unwrap_or(prev),
-                            has_next_page.unwrap_or(next),
-                            transactions,
-                        ));
-                    }
-                }
+                    (prev, next, transactions)
+                };
 
-                // If `transactionIds` were not specified, then there must be at least one
-                // subquery, and thus it should be safe to unwrap. Issue the query to fetch the
-                // set of `tx_sequence_number` that will then be used to fetch remaining
-                // contents from the `transactions` table.
-                let (prev, next, results) = page.paginate_raw_query::<TxLookup>(
-                    conn,
-                    checkpoint_viewed_at,
-                    subquery.unwrap(),
-                )?;
-
-                let tx_sequence_numbers = results
-                    .into_iter()
-                    .map(|x| x.tx_sequence_number)
-                    .collect::<Vec<i64>>();
-
-                // then just do a multi-get
-                let transactions = conn.results(move || {
-                    tx::transactions
-                        .filter(tx::tx_sequence_number.eq_any(tx_sequence_numbers.clone()))
-                })?;
-
-                return Ok::<_, diesel::result::Error>((
-                    has_prev_page.unwrap_or(prev),
-                    has_next_page.unwrap_or(next),
-                    transactions,
-                ));
+                Ok::<_, diesel::result::Error>((prev, next, transactions, tx_bounds))
             })
             .await?;
 
-        let mut conn = Connection::new(prev, next);
+        // hmmm.. the start_cursor and end_cursor are created from self.edges.first() and
+        // self.edges.last() how can we produce the cursors for when scan_limit doesn't yield a
+        // result but a user is still able to paginate forward and backwards?
+
+        let mut conn = TransactionBlockConnection::new(prev, next);
 
         for stored in transactions {
             let cursor = stored.cursor(checkpoint_viewed_at).encode_cursor();
@@ -396,7 +388,30 @@ impl TransactionBlock {
                 inner,
                 checkpoint_viewed_at,
             };
-            conn.edges.push(Edge::new(cursor, transaction));
+            conn.edges
+                .push(TransactionBlockEdge::new(cursor, transaction));
+        }
+
+        // if scan_limit is set, overwrite PageInfo of connection only if there are no edges
+        if scan_limit.is_some() && conn.edges.is_empty() {
+            conn.update_page_info(
+                tx_bounds.has_prev_page(),
+                tx_bounds.has_next_page(),
+                Some(
+                    Cursor::new(tx_cursor::TransactionBlockCursor {
+                        checkpoint_viewed_at,
+                        tx_sequence_number: tx_bounds.lo(),
+                    })
+                    .encode_cursor(),
+                ),
+                Some(
+                    Cursor::new(tx_cursor::TransactionBlockCursor {
+                        checkpoint_viewed_at,
+                        tx_sequence_number: tx_bounds.hi(),
+                    })
+                    .encode_cursor(),
+                ),
+            )
         }
 
         Ok(conn)

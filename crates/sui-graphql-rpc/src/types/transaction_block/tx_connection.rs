@@ -13,8 +13,11 @@ pub(crate) struct TransactionBlockEdge {
 }
 
 pub(crate) struct TransactionBlockConnection {
-    edges: Vec<TransactionBlockEdge>,
-    page_info: PageInfo,
+    pub edges: Vec<TransactionBlockEdge>,
+    pub has_previous_page: bool,
+    pub has_next_page: bool,
+    pub start_cursor: Option<String>,
+    pub end_cursor: Option<String>,
 }
 
 #[Object]
@@ -25,20 +28,18 @@ impl TransactionBlockConnection {
 
     async fn page_info(&self) -> PageInfo {
         let start_cursor = self
-            .page_info
             .start_cursor
             .clone()
             .or_else(|| self.edges.first().map(|edge| edge.cursor.clone()));
 
         let end_cursor = self
-            .page_info
             .end_cursor
             .clone()
             .or_else(|| self.edges.last().map(|edge| edge.cursor.clone()));
 
         PageInfo {
-            has_previous_page: self.page_info.has_previous_page,
-            has_next_page: self.page_info.has_next_page,
+            has_previous_page: self.has_previous_page,
+            has_next_page: self.has_next_page,
             start_cursor,
             end_cursor,
         }
@@ -46,21 +47,32 @@ impl TransactionBlockConnection {
 }
 
 impl TransactionBlockConnection {
-    pub(crate) fn new(
+    pub(crate) fn new(has_previous_page: bool, has_next_page: bool) -> Self {
+        Self {
+            edges: Vec::new(),
+            has_previous_page,
+            has_next_page,
+            start_cursor: None,
+            end_cursor: None,
+        }
+    }
+
+    pub(crate) fn update_page_info(
+        &mut self,
         has_previous_page: bool,
         has_next_page: bool,
         start_cursor: Option<String>,
         end_cursor: Option<String>,
-    ) -> Self {
-        let page_info = PageInfo {
-            has_previous_page,
-            has_next_page,
-            start_cursor,
-            end_cursor,
-        };
-        Self {
-            edges: Vec::new(),
-            page_info,
-        }
+    ) {
+        self.has_previous_page = has_previous_page;
+        self.has_next_page = has_next_page;
+        self.start_cursor = start_cursor;
+        self.end_cursor = end_cursor;
+    }
+}
+
+impl TransactionBlockEdge {
+    pub(crate) fn new(cursor: String, node: TransactionBlock) -> Self {
+        Self { cursor, node }
     }
 }

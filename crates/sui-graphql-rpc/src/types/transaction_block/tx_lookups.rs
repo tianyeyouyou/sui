@@ -106,13 +106,13 @@ impl TxBounds {
     /// When a scan limit is provided, `has_prev_page` will always evaluate to true if it is under
     /// the tx upper bound.
     pub(crate) fn has_prev_page(&self) -> bool {
-        self.adjusted > self.lo
+        self.lo() > self.lo
     }
 
     /// When a scan limit is provided, `has_next_page` will always evaluate to true if it is under
     /// the tx upper bound.
     pub(crate) fn has_next_page(&self) -> bool {
-        self.adjusted < self.hi
+        self.hi() < self.hi
     }
 }
 
