@@ -153,6 +153,7 @@ const MAX_PROTOCOL_VERSION: u64 = 52;
 //             Enable soft bundle in devnet and testnet.
 //             Core macro visibility in sui core framework.
 //             Enable Mysticeti on mainnet.
+// Version 53: Bump to allow variable coalescing optimization.
 
 #[derive(Copy, Clone, Debug, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion(u64);
@@ -2467,6 +2468,7 @@ impl ProtocolConfig {
 
                     cfg.feature_flags.consensus_choice = ConsensusChoice::Mysticeti;
                 }
+                53 => {}
                 // Use this template when making changes:
                 //
                 //     // modify an existing constant.
