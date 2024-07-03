@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_graphql::{connection::CursorType, dataloader::Loader, *};
+use connection::Edge;
 use diesel::{ExpressionMethods, JoinOnDsl, QueryDsl, SelectableHelper};
 use fastcrypto::encoding::{Base58, Encoding};
 pub(crate) use filter::TransactionBlockFilter;
@@ -20,12 +21,12 @@ use sui_types::{
         TransactionDataAPI, TransactionExpiration,
     },
 };
-pub(crate) use tx_connection::{TransactionBlockConnection, TransactionBlockEdge};
 pub(crate) use tx_cursor::Cursor;
 use tx_cursor::TxLookup;
 use tx_lookups::{subqueries, TxBounds};
 
 use crate::{
+    connection::Connection,
     data::{self, DataLoader, Db, DbConnection, QueryExecutor},
     error::Error,
     filter, query,
@@ -47,9 +48,10 @@ use super::{
 use tx_lookups::select_ids;
 
 mod filter;
-mod tx_connection;
 mod tx_cursor;
 mod tx_lookups;
+
+pub(crate) type TransactionBlockConnection = Connection<String, TransactionBlock>;
 
 /// Wraps the actual transaction block data with the checkpoint sequence number at which the data
 /// was viewed, for consistent results on paginating through and resolving nested types.
@@ -273,9 +275,9 @@ impl TransactionBlock {
         filter: TransactionBlockFilter,
         checkpoint_viewed_at: u64,
         scan_limit: Option<u64>,
-    ) -> Result<TransactionBlockConnection, Error> {
+    ) -> Result<Connection<String, TransactionBlock>, Error> {
         if let Err(_) = filter.is_consistent() {
-            return Ok(TransactionBlockConnection::new(false, false));
+            return Ok(Connection::new(false, false));
         }
 
         let cursor_viewed_at = page.validate_cursor_consistency()?;
@@ -326,6 +328,7 @@ impl TransactionBlock {
                         conn.results(move || select_ids(txs, tx_bounds).into_boxed())?;
 
                     let mut query = if transaction_ids.is_empty() {
+                        // early return
                         query!("SELECT * FROM TRANSACTIONS WHERE 1 = 0")
                     } else {
                         let digest_txs = transaction_ids
@@ -382,7 +385,7 @@ impl TransactionBlock {
         // self.edges.last() how can we produce the cursors for when scan_limit doesn't yield a
         // result but a user is still able to paginate forward and backwards?
 
-        let mut conn = TransactionBlockConnection::new(prev, next);
+        let mut conn = Connection::new(prev, next);
 
         for stored in transactions {
             let cursor = stored.cursor(checkpoint_viewed_at).encode_cursor();
@@ -391,10 +394,13 @@ impl TransactionBlock {
                 inner,
                 checkpoint_viewed_at,
             };
-            conn.edges
-                .push(TransactionBlockEdge::new(cursor, transaction));
+            conn.edges.push(Edge::new(cursor, transaction));
         }
 
+        // scan_limit = 100_000
+        // first: 50
+        // filters -> 10 actual results
+        // prev = false, next = false
         if scan_limit.is_some() {
             if !prev {
                 conn.has_previous_page = tx_bounds.has_prev_page;
