@@ -76,19 +76,6 @@ impl TransactionBlockConnection {
             end_cursor: None,
         }
     }
-
-    pub(crate) fn update_page_info(
-        &mut self,
-        has_previous_page: bool,
-        has_next_page: bool,
-        start_cursor: Option<String>,
-        end_cursor: Option<String>,
-    ) {
-        self.has_previous_page = has_previous_page;
-        self.has_next_page = has_next_page;
-        self.start_cursor = start_cursor;
-        self.end_cursor = end_cursor;
-    }
 }
 
 impl TransactionBlockEdge {
