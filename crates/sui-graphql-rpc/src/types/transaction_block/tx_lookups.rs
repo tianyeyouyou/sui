@@ -35,23 +35,45 @@ pub(crate) struct StoredTxBounds {
 pub(crate) struct TxBounds {
     pub lo: u64,
     pub hi: u64,
-    pub adjusted: u64,
-    pub is_from_front: bool,
+    pub has_prev_page: bool,
+    pub has_next_page: bool,
 }
 
 impl TxBounds {
-    pub(crate) fn new(lo: u64, hi: u64, scan_limit: Option<u64>, is_from_front: bool) -> Self {
-        let adjusted = if is_from_front {
-            scan_limit.map_or(hi, |limit| std::cmp::min(hi, lo.saturating_add(limit)))
+    /// Given the `tx_sequence_number` true lower and upper bound, optional cursors, and an optional
+    /// `scan_limit`, determine the new lower and upper bounds, and whether
+    pub(crate) fn new(
+        lo: u64,
+        hi: u64,
+        after: Option<u64>,
+        before: Option<u64>,
+        is_from_front: bool,
+        scan_limit: Option<u64>,
+    ) -> Self {
+        let mut adjusted_lo = after.map_or(lo, |a| std::cmp::max(lo, a));
+        let mut adjusted_hi = before.map_or(hi, |b| std::cmp::min(hi, b));
+
+        (adjusted_lo, adjusted_hi) = if is_from_front {
+            (
+                adjusted_lo,
+                scan_limit.map_or(adjusted_hi, |limit| {
+                    std::cmp::min(adjusted_hi, adjusted_lo.saturating_add(limit))
+                }),
+            )
         } else {
-            scan_limit.map_or(hi, |limit| std::cmp::max(lo, hi.saturating_sub(limit)))
+            (
+                scan_limit.map_or(adjusted_lo, |limit| {
+                    std::cmp::max(adjusted_lo, adjusted_hi.saturating_sub(limit))
+                }),
+                adjusted_hi,
+            )
         };
 
         Self {
-            lo,
-            hi,
-            adjusted,
-            is_from_front,
+            lo: adjusted_lo,
+            hi: adjusted_hi,
+            has_prev_page: adjusted_lo > lo,
+            has_next_page: adjusted_hi < hi,
         }
     }
 
@@ -82,16 +104,8 @@ impl TxBounds {
 
         println!("StoredTxBounds: {:?}", from_db);
 
-        let lo = std::cmp::max(
-            from_db.lo as u64,
-            page.after().map(|x| x.tx_sequence_number).unwrap_or(0),
-        );
-
-        let hi = std::cmp::min(
-            from_db.hi as u64,
-            page.before()
-                .map_or(from_db.hi as u64, |x| x.tx_sequence_number),
-        );
+        let lo = from_db.lo as u64;
+        let hi = from_db.hi as u64;
 
         println!("checkpoint_viewed_at: {}", checkpoint_viewed_at);
 
@@ -105,41 +119,14 @@ impl TxBounds {
             page.is_from_front()
         );
 
-        Ok(Self::new(lo, hi, scan_limit, page.is_from_front()))
-        // Ok(Self::new(
-        // from_db.lo as u64,
-        // from_db.hi as u64,
-        // scan_limit,
-        // page.is_from_front(),
-        // ))
-    }
-
-    pub(crate) fn lo(&self) -> u64 {
-        if self.is_from_front {
-            self.lo
-        } else {
-            self.adjusted
-        }
-    }
-
-    pub(crate) fn hi(&self) -> u64 {
-        if self.is_from_front {
-            self.adjusted
-        } else {
-            self.hi
-        }
-    }
-
-    /// When a scan limit is provided, `has_prev_page` will always evaluate to true if it is under
-    /// the tx upper bound.
-    pub(crate) fn has_prev_page(&self) -> bool {
-        self.lo() > self.lo
-    }
-
-    /// When a scan limit is provided, `has_next_page` will always evaluate to true if it is under
-    /// the tx upper bound.
-    pub(crate) fn has_next_page(&self) -> bool {
-        self.hi() < self.hi
+        Ok(Self::new(
+            lo,
+            hi,
+            page.after().map(|x| x.tx_sequence_number),
+            page.before().map(|x| x.tx_sequence_number),
+            page.is_from_front(),
+            scan_limit,
+        ))
     }
 }
 
@@ -358,8 +345,7 @@ pub(crate) fn select_tx(sender: Option<SuiAddress>, bound: TxBounds, from: &str)
         query,
         format!(
             "tx_sequence_number >= {} AND tx_sequence_number <= {}",
-            bound.lo(),
-            bound.hi()
+            bound.lo, bound.hi
         )
     )
 }

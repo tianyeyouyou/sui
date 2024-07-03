@@ -314,8 +314,8 @@ impl TransactionBlock {
                         checkpoint_viewed_at,
                         move || {
                             tx::transactions
-                                .filter(tx::tx_sequence_number.ge(tx_bounds.lo() as i64))
-                                .filter(tx::tx_sequence_number.le(tx_bounds.hi() as i64))
+                                .filter(tx::tx_sequence_number.ge(tx_bounds.lo as i64))
+                                .filter(tx::tx_sequence_number.le(tx_bounds.hi as i64))
                                 .into_boxed()
                         },
                     )?;
@@ -395,26 +395,27 @@ impl TransactionBlock {
                 .push(TransactionBlockEdge::new(cursor, transaction));
         }
 
-        // if scan_limit is set, overwrite PageInfo of connection only if there are no edges
-        if scan_limit.is_some() && conn.edges.is_empty() {
-            conn.update_page_info(
-                tx_bounds.has_prev_page(),
-                tx_bounds.has_next_page(),
-                Some(
+        if scan_limit.is_some() {
+            if !prev {
+                conn.has_previous_page = tx_bounds.has_prev_page;
+                conn.start_cursor = Some(
                     Cursor::new(tx_cursor::TransactionBlockCursor {
                         checkpoint_viewed_at,
-                        tx_sequence_number: tx_bounds.lo(),
+                        tx_sequence_number: tx_bounds.lo,
                     })
                     .encode_cursor(),
-                ),
-                Some(
+                );
+            }
+            if !next {
+                conn.has_next_page = tx_bounds.has_next_page;
+                conn.end_cursor = Some(
                     Cursor::new(tx_cursor::TransactionBlockCursor {
                         checkpoint_viewed_at,
-                        tx_sequence_number: tx_bounds.hi(),
+                        tx_sequence_number: tx_bounds.hi,
                     })
                     .encode_cursor(),
-                ),
-            )
+                );
+            }
         }
 
         Ok(conn)
