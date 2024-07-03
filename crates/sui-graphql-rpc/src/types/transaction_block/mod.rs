@@ -29,7 +29,6 @@ use crate::{
     connection::Connection,
     data::{self, DataLoader, Db, DbConnection, QueryExecutor},
     error::Error,
-    filter, query,
     server::watermark_task::Watermark,
 };
 
@@ -44,8 +43,6 @@ use super::{
     transaction_block_effects::{TransactionBlockEffects, TransactionBlockEffectsKind},
     transaction_block_kind::TransactionBlockKind,
 };
-
-use tx_lookups::select_ids;
 
 mod filter;
 mod tx_cursor;
@@ -276,7 +273,7 @@ impl TransactionBlock {
         checkpoint_viewed_at: u64,
         scan_limit: Option<u64>,
     ) -> Result<Connection<String, TransactionBlock>, Error> {
-        if let Err(_) = filter.is_consistent() {
+        if filter.is_empty() {
             return Ok(Connection::new(false, false));
         }
 
@@ -303,12 +300,8 @@ impl TransactionBlock {
 
                 // There are three potential types of queries we may construct. If no filters are
                 // selected, or if the filter is composed of only checkpoint filters, we can
-                // directly query the main `transactions` table. If `transactionIds` is specified,
-                // the query against `transactions` will apply two filters on `tx_sequence_number`,
-                // one where `tx_sequence_number` is in the list of digests, and where
-                // `tx_sequence_number` is in a subselect consisting of joins across the lookup
-                // tables. Finally, if other filters are specified, we first fetch the set of
-                // `tx_sequence_number` from a join over relevant lookup tables, and then issue a
+                // directly query the main `transactions` table. Otherwise, we first fetch the set
+                // of `tx_sequence_number` from a join over relevant lookup tables, and then issue a
                 // query against the `transactions` table to fetch the remaining contents.
                 let (prev, next, transactions) = if !filter.has_filters() {
                     let (prev, next, iter) = page.paginate_query::<StoredTransaction, _, _, _>(
@@ -323,42 +316,7 @@ impl TransactionBlock {
                     )?;
 
                     (prev, next, iter.collect())
-                } else if let Some(txs) = &filter.transaction_ids {
-                    let transaction_ids: Vec<TxLookup> =
-                        conn.results(move || select_ids(txs, tx_bounds).into_boxed())?;
-
-                    let mut query = if transaction_ids.is_empty() {
-                        // early return
-                        query!("SELECT * FROM TRANSACTIONS WHERE 1 = 0")
-                    } else {
-                        let digest_txs = transaction_ids
-                            .into_iter()
-                            .map(|x| (x.tx_sequence_number as u64).to_string())
-                            .collect::<Vec<String>>()
-                            .join(", ");
-
-                        filter!(
-                            query!("SELECT * FROM TRANSACTIONS"),
-                            format!("tx_sequence_number IN ({})", digest_txs)
-                        )
-                    };
-
-                    if let Some(subquery) = subqueries(&filter, tx_bounds) {
-                        query = query!("{} AND tx_sequence_number IN ({})", query, subquery);
-                    }
-
-                    let (prev, next, iter) = page.paginate_raw_query::<StoredTransaction>(
-                        conn,
-                        checkpoint_viewed_at,
-                        query,
-                    )?;
-
-                    (prev, next, iter.collect())
                 } else {
-                    // If `transactionIds` were not specified, then there must be at least one
-                    // subquery, and thus it should be safe to unwrap. Issue the query to fetch the
-                    // set of `tx_sequence_number` that will then be used to fetch remaining
-                    // contents from the `transactions` table.
                     let subquery = subqueries(&filter, tx_bounds).unwrap();
                     let (prev, next, results) =
                         page.paginate_raw_query::<TxLookup>(conn, checkpoint_viewed_at, subquery)?;
@@ -368,7 +326,6 @@ impl TransactionBlock {
                         .map(|x| x.tx_sequence_number)
                         .collect::<Vec<i64>>();
 
-                    // then just do a multi-get
                     let transactions = conn.results(move || {
                         tx::transactions
                             .filter(tx::tx_sequence_number.eq_any(tx_sequence_numbers.clone()))
