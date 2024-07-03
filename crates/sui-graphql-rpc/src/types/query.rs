@@ -36,6 +36,7 @@ use super::{
     transaction_metadata::TransactionMetadata,
     type_filter::ExactTypeFilter,
 };
+use crate::min_option;
 use crate::server::watermark_task::Watermark;
 use crate::types::base64::Base64 as GraphQLBase64;
 use crate::types::zklogin_verify_signature::verify_zklogin_signature;
@@ -317,6 +318,9 @@ impl Query {
         scan_limit: Option<u64>,
     ) -> Result<TransactionBlockConnection> {
         let Watermark { checkpoint, .. } = *ctx.data()?;
+
+        // let first = first.map(|f| f.min(scan_limit.unwrap_or(f)));
+        // let last = last.map(|l| l.min(scan_limit.unwrap_or(l)));
 
         let page = Page::from_params(ctx.data_unchecked(), first, after, last, before)?;
         TransactionBlock::paginate(

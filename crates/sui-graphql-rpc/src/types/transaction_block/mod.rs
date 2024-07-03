@@ -293,7 +293,7 @@ impl TransactionBlock {
                     filter.before_checkpoint,
                     checkpoint_viewed_at,
                     scan_limit,
-                    page.is_from_front(),
+                    &page,
                 )?;
 
                 println!("filter: {:?}", filter);

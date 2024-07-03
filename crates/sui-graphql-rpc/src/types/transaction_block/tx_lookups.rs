@@ -7,6 +7,7 @@ use crate::{
     filter, inner_join, max_option, min_option, query,
     raw_query::RawQuery,
     types::{
+        cursor::Page,
         digest::Digest,
         sui_address::SuiAddress,
         transaction_block::TransactionBlockKindInput,
@@ -21,7 +22,7 @@ use diesel::{
 use std::fmt::{self, Write};
 use sui_types::base_types::SuiAddress as NativeSuiAddress;
 
-use super::TransactionBlockFilter;
+use super::{Cursor, TransactionBlockFilter};
 
 /// The `tx_sequence_number` range of the transactions to be queried.
 #[derive(Clone, Debug, Copy)]
@@ -67,7 +68,7 @@ impl TxBounds {
         before_cp: Option<u64>,
         checkpoint_viewed_at: u64,
         scan_limit: Option<u64>,
-        is_from_front: bool,
+        page: &Page<Cursor>,
     ) -> Result<Self, diesel::result::Error> {
         let lo_cp = max_option!(after_cp.map(|x| x.saturating_add(1)), at_cp).unwrap_or(0);
         let hi_cp = min_option!(
@@ -79,12 +80,38 @@ impl TxBounds {
         let from_db: StoredTxBounds =
             conn.result(move || tx_bounds_query(lo_cp, hi_cp).into_boxed())?;
 
-        Ok(Self::new(
+        println!("StoredTxBounds: {:?}", from_db);
+
+        let lo = std::cmp::max(
             from_db.lo as u64,
+            page.after().map(|x| x.tx_sequence_number).unwrap_or(0),
+        );
+
+        let hi = std::cmp::min(
             from_db.hi as u64,
-            scan_limit,
-            is_from_front,
-        ))
+            page.before()
+                .map_or(from_db.hi as u64, |x| x.tx_sequence_number),
+        );
+
+        println!("checkpoint_viewed_at: {}", checkpoint_viewed_at);
+
+        println!("before: {:?}", page.before().map(|x| x.tx_sequence_number));
+
+        println!(
+            "TxBounds::Query: lo: {}, hi: {}, scan_limit: {}, is_from_front: {}",
+            lo,
+            hi,
+            scan_limit.unwrap_or(0),
+            page.is_from_front()
+        );
+
+        Ok(Self::new(lo, hi, scan_limit, page.is_from_front()))
+        // Ok(Self::new(
+        // from_db.lo as u64,
+        // from_db.hi as u64,
+        // scan_limit,
+        // page.is_from_front(),
+        // ))
     }
 
     pub(crate) fn lo(&self) -> u64 {
