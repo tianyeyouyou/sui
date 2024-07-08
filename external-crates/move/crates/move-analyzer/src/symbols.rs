@@ -354,7 +354,7 @@ impl CallInfo {
     }
 }
 
-/// Module-level definitions
+/// Module-level definitions and other module-related info
 #[derive(Debug, Clone, Ord, PartialOrd, PartialEq, Eq)]
 pub struct ModuleDefs {
     /// File where this module is located
