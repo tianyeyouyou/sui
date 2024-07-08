@@ -10,9 +10,10 @@ use std::{
 };
 
 use json_comments::StripComments;
-use lsp_types::Position;
+use lsp_types::{InlayHintKind, InlayHintLabel, Position};
 use move_analyzer::{
     completion::completion_items,
+    inlay_hints::inlay_hints_internal,
     symbols::{def_info_doc_string, get_symbols, maybe_convert_for_guard, Symbols, UseDefMap},
 };
 use move_command_line_common::testing::{
@@ -32,6 +33,7 @@ struct TestSuite {
 enum TestEntry {
     UseDefTest(UseDefTest),
     CompletionTest(CompletionTest),
+    HintTest(HintTest),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -42,6 +44,12 @@ struct UseDefTest {
 
 #[derive(Serialize, Deserialize)]
 struct CompletionTest {
+    use_line: u32,
+    use_col: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HintTest {
     use_line: u32,
     use_col: u32,
 }
@@ -176,6 +184,50 @@ impl CompletionTest {
     }
 }
 
+impl HintTest {
+    fn test(
+        &self,
+        test_idx: usize,
+        symbols: &Symbols,
+        output: &mut dyn std::io::Write,
+        use_file_path: &Path,
+    ) -> anyhow::Result<()> {
+        let inlay_hints = inlay_hints_internal(
+            &symbols,
+            use_file_path.to_path_buf(),
+            /* type_hints */ true,
+            /* param_hints */ true,
+        )
+        .unwrap();
+        let lsp_line = self.use_line - 1; // 0th-based
+
+        writeln!(output, "-- test {test_idx} -------------------")?;
+        let Some((hint, label_parts)) = inlay_hints.iter().find_map(|h| {
+            if h.position.line == lsp_line && h.position.character == self.use_col {
+                if let InlayHintLabel::LabelParts(parts) = &h.label {
+                    return Some((h, parts));
+                }
+            }
+            None
+        }) else {
+            writeln!(output, "NO INLAY HINT FOUND")?;
+            return Ok(());
+        };
+
+        match hint.kind {
+            Some(InlayHintKind::TYPE) => {
+                writeln!(output, "INLAY TYPE HINT : {}", label_parts[1].value)?
+            }
+            Some(InlayHintKind::PARAMETER) => {
+                writeln!(output, "INLAY PARAM HINT: {}", label_parts[0].value)?
+            }
+            _ => writeln!(output, "INLAY HINT OF UNKNOWN TYPE")?,
+        }
+
+        Ok(())
+    }
+}
+
 fn check_expected(expected_path: &Path, result: &str) -> anyhow::Result<()> {
     let update_baseline = read_env_update_baseline();
 
@@ -244,6 +296,9 @@ fn move_ide_testsuite(test_path: &Path) -> datatest_stable::Result<()> {
                 }
                 TestEntry::CompletionTest(completion_test) => {
                     completion_test.test(idx, &symbols, writer, &cpath)?;
+                }
+                TestEntry::HintTest(hint_test) => {
+                    hint_test.test(idx, &symbols, writer, &cpath)?;
                 }
             };
             writeln!(writer)?;
