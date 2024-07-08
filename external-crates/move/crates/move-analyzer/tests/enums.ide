@@ -5,193 +5,193 @@
     // test matching of variants
     "variant_match.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 7,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 8,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 8,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 9,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 9,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 9,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 9,
           "use_ndx": 3
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 9,
           "use_ndx": 4
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 10,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 3
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 19,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 20,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 20,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 20,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 20,
           "use_ndx": 3
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 21,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 21,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 21,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 24,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 24,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 24,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 24,
           "use_ndx": 3
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 24,
           "use_ndx": 4
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 24,
           "use_ndx": 5
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 24,
           "use_ndx": 6
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 24,
           "use_ndx": 8
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 24,
           "use_ndx": 9
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 25,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 25,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 25,
           "use_ndx": 3
         }
@@ -200,49 +200,49 @@
     // test matching of structs
     "struct_match.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 13,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 14,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 14,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 14,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 3
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 4
         }
@@ -251,31 +251,31 @@
     // test matching of ints
     "int_match.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 5,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 5,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 5,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 6,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 6,
           "use_ndx": 1
         }
@@ -284,7 +284,7 @@
     // test displaying of enum with many variants
     "long_enum.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 3,
           "use_ndx": 0
         }
@@ -293,25 +293,25 @@
     // test matching of mutable value (guards should be immutable refs)
     "mut_match.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 4,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 5,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 5,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 5,
           "use_ndx": 2
         }
@@ -320,67 +320,67 @@
     // test matching of nested patterns
     "nested_match.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 3
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 4
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 5
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 6
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 7
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 16,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 16,
           "use_ndx": 3
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 16,
           "use_ndx": 4
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 16,
           "use_ndx": 5
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 16,
           "use_ndx": 6
         }
@@ -390,19 +390,19 @@
     // but should only be displayed as immutable reference when inside inner guard)
     "nested_guard.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 4,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 4,
           "use_ndx": 3
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 4,
           "use_ndx": 4
         }

@@ -4,25 +4,25 @@
   "file_tests": {
     "let_mut.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 3,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 4,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 5,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 6,
           "use_ndx": 0
         }

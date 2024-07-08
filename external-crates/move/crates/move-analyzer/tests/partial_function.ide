@@ -4,7 +4,7 @@
   "file_tests": {
     "M1.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 3,
           "use_ndx": 0
         }

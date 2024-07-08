@@ -6,21 +6,21 @@
     "dot.move": [
       {
         // simple test
-        "CompletionTest": {
+        "Completion": {
           "use_line": 15,
           "use_col": 10
         }
       },
       {
         // with aliasing
-        "CompletionTest": {
+        "Completion": {
           "use_line": 21,
           "use_col": 10
         }
       },
       {
         // with shadowing
-        "CompletionTest": {
+        "Completion": {
           "use_line": 27,
           "use_col": 10
         }
@@ -30,7 +30,7 @@
     // and expansion of lambda parameters into their own snippets
     "macro_dot.move": [
       {
-        "CompletionTest": {
+        "Completion": {
           "use_line": 8,
           "use_col": 10
         }
@@ -39,7 +39,7 @@
     // tests completions coming from a different module
     "other_mod_dot.move": [
       {
-        "CompletionTest": {
+        "Completion": {
           "use_line": 4,
           "use_col": 10
         }

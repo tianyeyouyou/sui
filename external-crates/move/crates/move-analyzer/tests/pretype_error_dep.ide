@@ -6,13 +6,13 @@
   "file_tests": {
     "M1.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 3,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 13,
           "use_ndx": 0
         }
@@ -20,19 +20,19 @@
     ],
     "M2.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 5,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 9,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 6,
           "use_ndx": 1
         }

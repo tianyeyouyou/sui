@@ -5,97 +5,97 @@
   "file_tests": {
     "M6.move": [
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 5,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 11,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 15,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 16,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 16,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 16,
           "use_ndx": 3
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 27,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 32,
           "use_ndx": 0
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 27,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 28,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 28,
           "use_ndx": 2
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 39,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 44,
           "use_ndx": 1
         }
       },
       {
-        "UseDefTest": {
+        "UseDef": {
           "use_line": 44,
           "use_ndx": 2
         }

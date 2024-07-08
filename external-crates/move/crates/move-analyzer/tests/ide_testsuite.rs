@@ -31,9 +31,9 @@ struct TestSuite {
 
 #[derive(Serialize, Deserialize)]
 enum TestEntry {
-    UseDefTest(UseDefTest),
-    CompletionTest(CompletionTest),
-    HintTest(HintTest),
+    UseDef(UseDefTest),
+    Completion(CompletionTest),
+    Hint(HintTest),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -193,7 +193,7 @@ impl HintTest {
         use_file_path: &Path,
     ) -> anyhow::Result<()> {
         let inlay_hints = inlay_hints_internal(
-            &symbols,
+            symbols,
             use_file_path.to_path_buf(),
             /* type_hints */ true,
             /* param_hints */ true,
@@ -291,13 +291,13 @@ fn move_ide_testsuite(test_path: &Path) -> datatest_stable::Result<()> {
 
         for (idx, test) in tests.iter().enumerate() {
             match test {
-                TestEntry::UseDefTest(use_def_test) => {
+                TestEntry::UseDef(use_def_test) => {
                     use_def_test.test(idx, mod_symbols, &symbols, writer, &file, &cpath)?
                 }
-                TestEntry::CompletionTest(completion_test) => {
+                TestEntry::Completion(completion_test) => {
                     completion_test.test(idx, &symbols, writer, &cpath)?;
                 }
-                TestEntry::HintTest(hint_test) => {
+                TestEntry::Hint(hint_test) => {
                     hint_test.test(idx, &symbols, writer, &cpath)?;
                 }
             };
