@@ -20,6 +20,8 @@ use crate::{
     shared::{unique_map::UniqueMap, CompilationEnv},
 };
 
+use std::collections::BTreeSet;
+
 pub type Optimization = fn(
     &FunctionSignature,
     &UniqueMap<Var, (Mutability, SingleType)>,
@@ -47,12 +49,17 @@ pub fn optimize(
     env: &mut CompilationEnv,
     package: Option<Symbol>,
     signature: &FunctionSignature,
-    locals: &UniqueMap<Var, (Mutability, SingleType)>,
+    infinite_loop_starts: &BTreeSet<Label>,
+    locals: &mut UniqueMap<Var, (Mutability, SingleType)>,
     constants: &UniqueMap<ConstantName, Value>,
     cfg: &mut MutForwardCFG,
+    is_constant: bool,
 ) {
     let mut count = 0;
-    let optimizations = if env.supports_feature(package, FeatureGate::Move2024Optimizations) {
+
+    let optimize_2024 = env.supports_feature(package, FeatureGate::Move2024Optimizations);
+
+    let optimizations = if optimize_2024 {
         MOVE_2024_OPTIMIZATIONS
     } else {
         OPTIMIZATIONS
@@ -71,5 +78,28 @@ pub fn optimize(
         } else {
             count += 1
         }
+    }
+    // If we aren't optimizing a constant, attempt to coalesce locals and re-optimize.
+    if !is_constant && optimize_2024 {
+        let new_locals = coalesce_locals::optimize(
+            signature,
+            infinite_loop_starts,
+            locals.clone(),
+            cfg,
+        );
+        *locals = new_locals;
+        cfg.recompute();
+
+        // Re-optimize, but don't recur again.
+        optimize(
+            env,
+            package,
+            signature,
+            infinite_loop_starts,
+            locals,
+            constants,
+            cfg,
+            true,
+        );
     }
 }
