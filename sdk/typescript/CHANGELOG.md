@@ -1,5 +1,11 @@
 # @mysten/sui.js
 
+## 1.2.2
+
+### Patch Changes
+
+- 0fb06282bf: Mark subscription methods as deprecated.
+
 ## 1.2.1
 
 ### Patch Changes
