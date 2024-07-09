@@ -2477,6 +2477,9 @@ impl ProtocolConfig {
                         cfg.feature_flags
                             .prepend_prologue_tx_in_consensus_commit_in_checkpoints = true;
                     }
+
+                    cfg.checkpoint_summary_version_specific_data = None;
+                    cfg.min_checkpoint_interval_ms = None;
                 }
                 // Use this template when making changes:
                 //
